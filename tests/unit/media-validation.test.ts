@@ -36,6 +36,53 @@ describe("media validation", () => {
     ).resolves.toMatchObject({ mediaType: "image", mimeType: "image/png" });
   });
 
+  it("accepts a progressive JPEG with metadata", async () => {
+    const filePath = path.join(directory, "downloaded.jpeg");
+    await sharp({
+      create: {
+        width: 8,
+        height: 6,
+        channels: 3,
+        background: "#d9a066",
+      },
+    })
+      .withMetadata({ orientation: 6 })
+      .jpeg({ progressive: true })
+      .toFile(filePath);
+    const stat = await fs.stat(filePath);
+
+    await expect(
+      validateMediaFile(filePath, "downloaded.jpeg", "image/jpeg", stat.size),
+    ).resolves.toMatchObject({
+      mediaType: "image",
+      mimeType: "image/jpeg",
+      extension: ".jpeg",
+    });
+  });
+
+  it("reports a renamed image as a format mismatch instead of corruption", async () => {
+    const filePath = path.join(directory, "renamed.jpeg");
+    await sharp({
+      create: {
+        width: 2,
+        height: 2,
+        channels: 3,
+        background: "#00aacc",
+      },
+    })
+      .png()
+      .toFile(filePath);
+    const stat = await fs.stat(filePath);
+
+    await expect(
+      validateMediaFile(filePath, "renamed.jpeg", "image/jpeg", stat.size),
+    ).rejects.toMatchObject({
+      code: "unsupported_media_type",
+      message:
+        "文件扩展名为 .jpeg，但实际检测为PNG。请使用图片的真实扩展名后重试。",
+    });
+  });
+
   it("accepts H.264 markers and rejects HEVC markers", async () => {
     const h264Path = path.join(directory, "h264.mp4");
     const hevcPath = path.join(directory, "hevc.mp4");
