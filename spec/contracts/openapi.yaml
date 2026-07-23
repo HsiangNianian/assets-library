@@ -1,0 +1,131 @@
+openapi: 3.1.0
+info:
+  title: Multimodal Asset Library MVP API
+  version: 1.0.0
+paths:
+  /api/uploads:
+    post:
+      summary: Upload one local image or H.264 MP4
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, directPublish]
+              properties:
+                file: { type: string, format: binary }
+                directPublish: { type: boolean }
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UploadStatus" }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/uploads/{uploadId}:
+    get:
+      summary: Get upload status
+      parameters:
+        - { name: uploadId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Current status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UploadStatus" }
+  /api/assets:
+    get:
+      summary: List published assets
+      parameters:
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 24 } }
+      responses:
+        "200": { description: Asset page }
+  /api/assets/{assetId}:
+    parameters:
+      - { name: assetId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: Get asset detail
+      responses:
+        "200": { description: Asset detail }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Replace editable metadata
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssetEdit" }
+      responses:
+        "200": { description: Updated detail }
+    delete:
+      summary: Soft-delete asset and enqueue cleanup
+      responses:
+        "204": { description: Deleted }
+  /api/assets/{assetId}/publish:
+    post:
+      summary: Publish a completed asset
+      parameters:
+        - { name: assetId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Published detail }
+  /api/assets/{assetId}/retry:
+    post:
+      summary: Requeue a failed asset
+      parameters:
+        - { name: assetId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "202": { description: Requeued status }
+  /api/media/{assetId}:
+    get:
+      summary: Stream original media with Range support
+      parameters:
+        - { name: assetId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Full media }
+        "206": { description: Partial media }
+components:
+  responses:
+    Error:
+      description: Stable error response
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: object
+                required: [code, message]
+                properties:
+                  code: { type: string }
+                  message: { type: string }
+  schemas:
+    UploadStatus:
+      type: object
+      required: [uploadId, assetId, mediaType, processingStatus, reviewStatus, progressPercent, failureCode, failureMessage]
+      properties:
+        uploadId: { type: string, format: uuid }
+        assetId: { type: string, format: uuid }
+        mediaType: { type: string, enum: [image, video] }
+        processingStatus: { type: string, enum: [queued, validating, analyzing, completed, failed] }
+        reviewStatus: { type: string, enum: [pending_review, published, deleted] }
+        progressPercent: { type: integer, minimum: 0, maximum: 100 }
+        failureCode: { type: [string, "null"] }
+        failureMessage: { type: [string, "null"] }
+    AssetEdit:
+      type: object
+      required: [name, description, tags]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+        description: { type: string, maxLength: 10000 }
+        tags:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required: [category, value]
+            properties:
+              category: { type: string, minLength: 1, maxLength: 64 }
+              value: { type: string, minLength: 1, maxLength: 128 }
