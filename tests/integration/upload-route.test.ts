@@ -35,7 +35,9 @@ describe("streaming upload route", () => {
     const validBody = new FormData();
     validBody.append(
       "file",
-      new File([imageBytes], "valid.png", { type: "image/png" }),
+      new File([imageBytes], "现代AI智能体工作台背景插画.png", {
+        type: "image/png",
+      }),
     );
     validBody.append("directPublish", "false");
     const accepted = await POST(
@@ -45,10 +47,21 @@ describe("streaming upload route", () => {
       }),
     );
     expect(accepted.status).toBe(202);
-    await expect(accepted.json()).resolves.toMatchObject({
+    const upload = (await accepted.json()) as {
+      assetId: string;
+      mediaType: string;
+      processingStatus: string;
+      reviewStatus: string;
+    };
+    expect(upload).toMatchObject({
       mediaType: "image",
       processingStatus: "queued",
       reviewStatus: "pending_review",
+    });
+    const { getAssetDetail } = await import("@/server/repositories/assets");
+    expect(getAssetDetail(upload.assetId)).toMatchObject({
+      name: "现代AI智能体工作台背景插画",
+      originalFilename: "现代AI智能体工作台背景插画.png",
     });
 
     const invalidBody = new FormData();
