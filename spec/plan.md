@@ -39,11 +39,12 @@ XHR 流式上传 → 临时文件 → 类型/大小/内容校验 → 原子移�
   → 概览、详情、编辑、发布、重试、删除
 ```
 
-视频模型输入只在 `openai_chat_completions + chat_video_url + APP_PUBLIC_URL` 组合下开启。其他组合以 `model_video_unsupported` 终止，不执行媒体降级。
+视频模型输入只在 Chat Completions 下开启，统一构造 `video_url` 并传入默认 `fps=1`。`auto` 模式对严格小于 7 MiB 的原文件使用 Base64 Data URL，达到 7 MiB 时改用短期签名公网 URL；大视频缺少公网 HTTPS 配置时以 `model_video_public_url_required` 终止并允许配置后重试。兼容模式 `chat_video_url` 始终使用签名 URL。Responses 或禁用模式以 `model_video_unsupported` 终止。
 
 ## 运行边界
 
 - Web 与 worker 是同一仓库的两个长期 Node 进程，共享数据库和媒体目录。
 - 不依赖 Redis、消息队列、对象存储或 FFmpeg。
+- 应用不抽帧；帧采样由支持 `video_url` 的模型服务完成，不产生本地中间媒体。
 - 删除先软删除，再由 worker 清理素材目录。
 - 模型密钥、签名密钥及原始模型响应不得写入日志或数据库。

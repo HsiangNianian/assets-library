@@ -14,12 +14,12 @@ function signature(payload: string, secret: string) {
 export function createModelMediaToken(
   assetId: string,
   expiresAt = Date.now() + 10 * 60_000,
+  secret = loadConfig().MEDIA_SIGNING_SECRET,
 ) {
-  const config = loadConfig();
   const payload = Buffer.from(
     JSON.stringify({ assetId, expiresAt } satisfies SignedPayload),
   ).toString("base64url");
-  return `${payload}.${signature(payload, config.MEDIA_SIGNING_SECRET)}`;
+  return `${payload}.${signature(payload, secret)}`;
 }
 
 export function verifyModelMediaToken(token: string) {

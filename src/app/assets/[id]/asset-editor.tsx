@@ -302,19 +302,61 @@ function AnalysisView({ analysis }: { analysis: AssetDetail["analysis"] }) {
       <div className="flex flex-wrap gap-2">
         {analysis.topics.map((topic) => <Badge key={topic}>{topic}</Badge>)}
       </div>
-      <div>
-        <p className="mb-3 font-medium text-slate-500">关键时间点</p>
+      <TimedSection
+        title="视觉分段"
+        items={analysis.visualSegments.map((segment) => ({
+          time: `${formatSeconds(segment.startSeconds)}–${formatSeconds(segment.endSeconds)}`,
+          summary: segment.summary,
+        }))}
+      />
+      <TimedSection
+        title="关键时间点"
+        items={analysis.keyMoments.map((moment) => ({
+          time: formatSeconds(moment.seconds),
+          summary: moment.summary,
+        }))}
+      />
+      <TimedSection
+        title="时间轴"
+        items={analysis.timeline.map((entry) => ({
+          time: `${formatSeconds(entry.startSeconds)}–${formatSeconds(entry.endSeconds)}`,
+          summary: entry.summary,
+        }))}
+      />
+    </div>
+  );
+}
+
+function formatSeconds(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds - minutes * 60;
+  return minutes > 0
+    ? `${minutes}:${remainder.toFixed(1).padStart(4, "0")}`
+    : `${remainder.toFixed(1)}s`;
+}
+
+function TimedSection({
+  title,
+  items,
+}: {
+  title: string;
+  items: Array<{ time: string; summary: string }>;
+}) {
+  return (
+    <div>
+      <p className="mb-3 font-medium text-slate-500">{title}</p>
+      {items.length > 0 ? (
         <ol className="space-y-3 border-l border-slate-200 pl-4">
-          {analysis.keyMoments.map((moment) => (
-            <li key={`${moment.seconds}-${moment.summary}`}>
-              <span className="font-mono text-xs text-cyan-700">
-                {moment.seconds.toFixed(1)}s
-              </span>
-              <p className="mt-1">{moment.summary}</p>
+          {items.map((item) => (
+            <li key={`${item.time}-${item.summary}`}>
+              <span className="font-mono text-xs text-cyan-700">{item.time}</span>
+              <p className="mt-1">{item.summary}</p>
             </li>
           ))}
         </ol>
-      </div>
+      ) : (
+        <p className="text-slate-400">模型未返回相关内容。</p>
+      )}
     </div>
   );
 }

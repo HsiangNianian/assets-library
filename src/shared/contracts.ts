@@ -28,6 +28,7 @@ export const failureCodeSchema = z.enum([
   "unsupported_video_codec",
   "model_not_configured",
   "model_video_unsupported",
+  "model_video_public_url_required",
   "model_request_failed",
   "model_response_invalid",
   "storage_error",

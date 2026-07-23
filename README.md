@@ -7,7 +7,7 @@
 - JPEG、PNG、WebP 图片，默认最大 20 MB
 - H.264 编码的 MP4 视频，默认最大 200 MB
 
-音频、URL 上传、批量上传、抽帧、音轨分析和转码不在本阶段范围内。
+音频、URL 上传、批量上传、应用侧抽帧、音轨分析和转码不在本阶段范围内。
 
 ## 本地运行
 
@@ -29,15 +29,19 @@ pnpm dev
 
 并配置 `MODEL_BASE_URL`、`MODEL_API_KEY`、`MODEL_NAME`。兼容百炼等第三方服务时使用其 OpenAI 兼容 Base URL。
 
-视频分析只支持声明兼容 `video_url` 的 Chat Completions 服务。还需配置：
+视频分析只支持声明兼容 `video_url` 的 Chat Completions 服务。千问在模型服务端按默认 1 FPS 抽帧，本应用不生成帧文件。配置：
 
 ```dotenv
-MODEL_VIDEO_MODE=chat_video_url
-APP_PUBLIC_URL=https://your-public-host.example
+MODEL_VIDEO_MODE=auto
+MODEL_VIDEO_FPS=1
+MODEL_VIDEO_TIMEOUT_MS=300000
+APP_PUBLIC_URL=
 MEDIA_SIGNING_SECRET=a-long-random-secret
 ```
 
-Responses 协议或未启用视频能力时，视频任务会明确失败为 `model_video_unsupported`。
+严格小于 7 MiB 的视频优先以 Base64 Data URL 传递，不需要公网地址。达到 7 MiB 的视频改用短期签名 URL，此时必须配置公网 HTTPS `APP_PUBLIC_URL` 和非默认 `MEDIA_SIGNING_SECRET`；缺少配置时任务失败为 `model_video_public_url_required`，配置后可重试。`chat_video_url` 作为仅使用签名 URL 的兼容模式继续保留。
+
+Responses 协议或禁用视频能力时，视频任务会明确失败为 `model_video_unsupported`。当前只分析画面，不处理音轨、ASR、语言或字幕。
 
 ## 生产运行
 
