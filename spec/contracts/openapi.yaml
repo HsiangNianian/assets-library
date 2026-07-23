@@ -100,9 +100,25 @@ components:
                 type: object
                 required: [code, message]
                 properties:
-                  code: { type: string }
+                  code: { $ref: "#/components/schemas/FailureCode" }
                   message: { type: string }
   schemas:
+    FailureCode:
+      type: string
+      enum:
+        - invalid_request
+        - multiple_files
+        - unsupported_media_type
+        - file_too_large
+        - corrupt_file
+        - unsupported_video_codec
+        - model_not_configured
+        - model_video_unsupported
+        - model_video_public_url_required
+        - model_request_failed
+        - model_response_invalid
+        - storage_error
+        - internal_error
     UploadStatus:
       type: object
       required: [uploadId, assetId, mediaType, processingStatus, reviewStatus, progressPercent, failureCode, failureMessage]
@@ -113,7 +129,10 @@ components:
         processingStatus: { type: string, enum: [queued, validating, analyzing, completed, failed] }
         reviewStatus: { type: string, enum: [pending_review, published, deleted] }
         progressPercent: { type: integer, minimum: 0, maximum: 100 }
-        failureCode: { type: [string, "null"] }
+        failureCode:
+          anyOf:
+            - { $ref: "#/components/schemas/FailureCode" }
+            - { type: "null" }
         failureMessage: { type: [string, "null"] }
     AssetEdit:
       type: object

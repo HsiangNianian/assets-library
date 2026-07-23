@@ -13,8 +13,12 @@ const envSchema = z.object({
   MODEL_API_KEY: z.string().optional(),
   MODEL_NAME: z.string().optional(),
   MODEL_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+  MODEL_VIDEO_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
   MODEL_RETRY_COUNT: z.coerce.number().int().min(0).max(3).default(1),
-  MODEL_VIDEO_MODE: z.enum(["disabled", "chat_video_url"]).default("disabled"),
+  MODEL_VIDEO_MODE: z
+    .enum(["disabled", "auto", "chat_video_url"])
+    .default("auto"),
+  MODEL_VIDEO_FPS: z.coerce.number().min(0.1).max(10).default(1),
   APP_PUBLIC_URL: z.string().url().optional().or(z.literal("")),
   MEDIA_SIGNING_SECRET: z.string().min(16).default("development-only-signing-secret"),
 });

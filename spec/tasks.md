@@ -42,3 +42,11 @@
 - [x] T026 通过 lint、typecheck、test、e2e 和 build
 - [x] T027 同步 OpenAPI、quickstart 与规格文档
 - [x] T028 增加仅按标签值搜索的概览栏、API 查询和回归测试
+
+## Phase 6：视频视觉分析增强
+
+- [x] T029 补充 Base64、签名 URL、1 FPS 和视频能力失败的模型适配器测试
+- [x] T030 实现小于 7 MiB Base64 优先与大视频签名公网 URL 回退
+- [x] T031 完善视频视觉分段、关键时间点和时间轴展示
+- [x] T032 同步错误契约、环境变量、OpenAPI、README 与规格文档
+- [x] T033 通过 lint、typecheck、test、e2e 和 build

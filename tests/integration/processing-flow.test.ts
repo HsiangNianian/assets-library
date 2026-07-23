@@ -129,4 +129,62 @@ describe("complete asset processing flow", () => {
     await expect(fs.stat(storage.resolveMediaPath(originalPath))).rejects.toThrow();
     expect(() => repository.getAssetDetail(assetId)).toThrow();
   });
+
+  it("persists every video timeline section", async () => {
+    const [storage, repository, processing] = await Promise.all([
+      import("@/server/media/storage"),
+      import("@/server/repositories/assets"),
+      import("@/server/services/processing"),
+    ]);
+    const assetId = crypto.randomUUID();
+    const uploadId = crypto.randomUUID();
+    const temporaryPath = storage.temporaryUploadPath("video-flow-upload");
+    await fs.writeFile(temporaryPath, "video");
+    const originalPath = storage.moveIntoAssetStorage(
+      temporaryPath,
+      assetId,
+      ".mp4",
+    );
+    repository.createAsset({
+      assetId,
+      uploadId,
+      name: "video",
+      originalFilename: "video.mp4",
+      originalPath,
+      mimeType: "video/mp4",
+      declaredMime: "video/mp4",
+      mediaType: "video",
+      sizeBytes: 5,
+      directPublish: false,
+    });
+    const analyzer: MultimodalAnalyzer = {
+      async analyze() {
+        return {
+          kind: "video",
+          description: "产品演示视频",
+          topics: ["产品"],
+          tags: { scene: ["室内"], person: [], form: ["演示"] },
+          visualSegments: [
+            { startSeconds: 0, endSeconds: 4, summary: "展示产品外观" },
+          ],
+          keyMoments: [{ seconds: 2, summary: "出现产品名称" }],
+          timeline: [
+            { startSeconds: 0, endSeconds: 4, summary: "完成一次演示" },
+          ],
+        };
+      },
+    };
+
+    const job = repository.claimNextJob();
+    expect(job?.assetId).toBe(assetId);
+    await processing.processJob(job!, analyzer);
+
+    const detail = repository.getAssetDetail(assetId);
+    expect(detail.analysis).toMatchObject({
+      kind: "video",
+      visualSegments: [{ summary: "展示产品外观" }],
+      keyMoments: [{ summary: "出现产品名称" }],
+      timeline: [{ summary: "完成一次演示" }],
+    });
+  });
 });

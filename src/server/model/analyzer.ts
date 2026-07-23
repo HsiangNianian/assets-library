@@ -20,6 +20,9 @@ export interface MultimodalAnalyzer {
   analyze(input: AnalyzeInput): Promise<AnalysisResult>;
 }
 
+const MAX_BASE64_VIDEO_BYTES = 7 * 1024 * 1024;
+const DEVELOPMENT_SIGNING_SECRET = "development-only-signing-secret";
+
 const imageShape = `{
   "kind":"image",
   "description":"string",
@@ -102,15 +105,42 @@ async function mediaContent(input: AnalyzeInput, config: AppConfig) {
   }
   if (
     config.MODEL_PROTOCOL !== "openai_chat_completions" ||
-    config.MODEL_VIDEO_MODE !== "chat_video_url" ||
-    !config.APP_PUBLIC_URL
+    config.MODEL_VIDEO_MODE === "disabled"
   ) {
     throw new AppError("model_video_unsupported");
   }
-  const token = createModelMediaToken(input.assetId);
-  const url = `${config.APP_PUBLIC_URL.replace(/\/$/, "")}/api/model-media/${token}`;
+  const filePath = resolveMediaPath(input.relativePath, config.mediaRoot);
+  const stat = await fs.stat(filePath);
+  let url: string;
+  if (
+    config.MODEL_VIDEO_MODE === "auto" &&
+    stat.size < MAX_BASE64_VIDEO_BYTES
+  ) {
+    const bytes = await fs.readFile(filePath);
+    url = `data:${input.mimeType};base64,${bytes.toString("base64")}`;
+  } else {
+    const publicUrl = config.APP_PUBLIC_URL
+      ? new URL(config.APP_PUBLIC_URL)
+      : null;
+    if (
+      !publicUrl ||
+      publicUrl.protocol !== "https:" ||
+      config.MEDIA_SIGNING_SECRET === DEVELOPMENT_SIGNING_SECRET
+    ) {
+      throw new AppError("model_video_public_url_required");
+    }
+    const token = createModelMediaToken(
+      input.assetId,
+      Date.now() + 10 * 60_000,
+      config.MEDIA_SIGNING_SECRET,
+    );
+    url = `${publicUrl.toString().replace(/\/$/, "")}/api/model-media/${token}`;
+  }
   return {
-    chat: { type: "video_url", video_url: { url } },
+    chat: {
+      type: "video_url",
+      video_url: { url, fps: config.MODEL_VIDEO_FPS },
+    },
     responses: null,
   };
 }
@@ -129,7 +159,9 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
       const controller = new AbortController();
       const timer = setTimeout(
         () => controller.abort(),
-        this.config.MODEL_TIMEOUT_MS,
+        input.mediaType === "video"
+          ? this.config.MODEL_VIDEO_TIMEOUT_MS
+          : this.config.MODEL_TIMEOUT_MS,
       );
       try {
         const isChat = this.config.MODEL_PROTOCOL === "openai_chat_completions";
