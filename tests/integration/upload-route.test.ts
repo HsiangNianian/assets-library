@@ -1,0 +1,74 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import sharp from "sharp";
+
+describe("streaming upload route", () => {
+  let directory: string;
+
+  beforeAll(async () => {
+    directory = await fs.mkdtemp(path.join(os.tmpdir(), "asset-upload-route-"));
+    process.env.DATABASE_PATH = path.join(directory, "assets.db");
+    process.env.MEDIA_ROOT = path.join(directory, "media");
+  });
+
+  afterAll(async () => {
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  it("accepts one PNG and rejects multiple files", async () => {
+    const png = await sharp({
+      create: {
+        width: 3,
+        height: 3,
+        channels: 3,
+        background: "#0ea5e9",
+      },
+    })
+      .png()
+      .toBuffer();
+    const imageBytes = new ArrayBuffer(png.byteLength);
+    new Uint8Array(imageBytes).set(png);
+    const { POST } = await import("@/app/api/uploads/route");
+
+    const validBody = new FormData();
+    validBody.append(
+      "file",
+      new File([imageBytes], "valid.png", { type: "image/png" }),
+    );
+    validBody.append("directPublish", "false");
+    const accepted = await POST(
+      new Request("http://localhost/api/uploads", {
+        method: "POST",
+        body: validBody,
+      }),
+    );
+    expect(accepted.status).toBe(202);
+    await expect(accepted.json()).resolves.toMatchObject({
+      mediaType: "image",
+      processingStatus: "queued",
+      reviewStatus: "pending_review",
+    });
+
+    const invalidBody = new FormData();
+    invalidBody.append(
+      "file",
+      new File([imageBytes], "one.png", { type: "image/png" }),
+    );
+    invalidBody.append(
+      "file",
+      new File([imageBytes], "two.png", { type: "image/png" }),
+    );
+    const rejected = await POST(
+      new Request("http://localhost/api/uploads", {
+        method: "POST",
+        body: invalidBody,
+      }),
+    );
+    expect(rejected.status).toBe(400);
+    await expect(rejected.json()).resolves.toMatchObject({
+      error: { code: "multiple_files" },
+    });
+  });
+});
