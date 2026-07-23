@@ -40,6 +40,7 @@ paths:
       parameters:
         - { name: cursor, in: query, schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 24 } }
+        - { name: tag, in: query, description: Case-insensitive partial match against tag values only, schema: { type: string, maxLength: 128 } }
       responses:
         "200": { description: Asset page }
   /api/assets/{assetId}:

@@ -109,6 +109,9 @@ describe("complete asset processing flow", () => {
     detail = repository.publishAsset(assetId);
     expect(detail.reviewStatus).toBe("published");
     expect(repository.listPublishedAssets().items).toHaveLength(1);
+    expect(repository.listPublishedAssets(undefined, 24, "展").items).toHaveLength(1);
+    expect(repository.listPublishedAssets(undefined, 24, "活动").items).toHaveLength(0);
+    expect(repository.listPublishedAssets(undefined, 24, "人工").items).toHaveLength(0);
 
     const partial = media.mediaResponse(
       assetId,
