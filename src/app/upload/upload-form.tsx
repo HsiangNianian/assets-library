@@ -1,0 +1,176 @@
+"use client";
+
+import Link from "next/link";
+import { useRef, useState } from "react";
+import { CheckCircle2, FileVideo2, ImageIcon, UploadCloud, XCircle } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import type { UploadStatus } from "@/shared/contracts";
+
+interface ApiError {
+  error?: { message?: string };
+}
+
+export function UploadForm() {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [directPublish, setDirectPublish] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [status, setStatus] = useState<UploadStatus | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const poll = async (uploadId: string) => {
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      const response = await fetch(`/api/uploads/${uploadId}`, { cache: "no-store" });
+      if (!response.ok) return;
+      const next = (await response.json()) as UploadStatus;
+      setStatus(next);
+      if (next.processingStatus === "completed" || next.processingStatus === "failed") {
+        setBusy(false);
+        return;
+      }
+    }
+  };
+
+  const upload = () => {
+    if (!file) return;
+    setBusy(true);
+    setError("");
+    setProgress(0);
+    const body = new FormData();
+    body.append("file", file);
+    body.append("directPublish", String(directPublish));
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/uploads");
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) setProgress(Math.round((event.loaded / event.total) * 100));
+    };
+    xhr.onerror = () => {
+      setError("网络连接中断，请重试。");
+      setBusy(false);
+    };
+    xhr.onload = () => {
+      const payload = JSON.parse(xhr.responseText || "{}") as UploadStatus & ApiError;
+      if (xhr.status !== 202) {
+        setError(payload.error?.message ?? "上传失败，请检查文件。");
+        setBusy(false);
+        return;
+      }
+      setStatus(payload);
+      void poll(payload.uploadId);
+    };
+    xhr.send(body);
+  };
+
+  const choose = (selected?: File) => {
+    if (!selected) return;
+    setFile(selected);
+    setError("");
+    setStatus(null);
+    setProgress(0);
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <div
+          className="flex min-h-64 cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50/70 p-8 text-center transition hover:border-cyan-400 hover:bg-cyan-50/40"
+          onClick={() => inputRef.current?.click()}
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => {
+            event.preventDefault();
+            if (event.dataTransfer.files.length > 1) {
+              setError("单次只能上传一个文件。");
+              return;
+            }
+            choose(event.dataTransfer.files[0]);
+          }}
+        >
+          <input
+            ref={inputRef}
+            type="file"
+            className="hidden"
+            accept=".jpg,.jpeg,.png,.webp,.mp4,image/jpeg,image/png,image/webp,video/mp4"
+            onChange={(event) => choose(event.target.files?.[0])}
+          />
+          <span className="mb-5 grid size-16 place-items-center rounded-2xl bg-white text-cyan-700 shadow-sm">
+            <UploadCloud className="size-8" />
+          </span>
+          <h2 className="text-lg font-semibold">
+            {file ? file.name : "拖放文件到这里，或点击选择"}
+          </h2>
+          <p className="mt-2 text-sm text-slate-500">
+            JPEG / PNG / WebP ≤ 20 MB · H.264 MP4 ≤ 200 MB
+          </p>
+          {file && (
+            <p className="mt-4 flex items-center gap-2 text-sm font-medium text-cyan-700">
+              {file.type.startsWith("video") ? <FileVideo2 className="size-4" /> : <ImageIcon className="size-4" />}
+              {(file.size / 1024 / 1024).toFixed(1)} MB
+            </p>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        <label className="flex items-start gap-3 rounded-xl border border-slate-200 p-4">
+          <input
+            type="checkbox"
+            checked={directPublish}
+            disabled={busy}
+            onChange={(event) => setDirectPublish(event.target.checked)}
+            className="mt-0.5 size-4 accent-cyan-600"
+          />
+          <span>
+            <span className="block text-sm font-medium">分析完成后直接入库</span>
+            <span className="mt-1 block text-xs text-slate-500">
+              关闭时，分析结果需要在详情页审核和确认。
+            </span>
+          </span>
+        </label>
+
+        {busy && (
+          <div>
+            <div className="mb-2 flex justify-between text-sm">
+              <span>{status ? "正在分析素材" : "正在上传文件"}</span>
+              <span>{status?.progressPercent ?? progress}%</span>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+              <div
+                className="h-full rounded-full bg-cyan-500 transition-all"
+                style={{ width: `${status?.progressPercent ?? progress}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <p className="flex items-center gap-2 rounded-lg bg-red-50 p-3 text-sm text-red-700">
+            <XCircle className="size-4 shrink-0" /> {error}
+          </p>
+        )}
+        {status?.processingStatus === "failed" && (
+          <p className="flex items-start gap-2 rounded-lg bg-red-50 p-3 text-sm text-red-700">
+            <XCircle className="mt-0.5 size-4 shrink-0" /> {status.failureMessage}
+          </p>
+        )}
+        {status?.processingStatus === "completed" && (
+          <p className="flex items-center gap-2 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-700">
+            <CheckCircle2 className="size-4" /> 分析完成，可以查看和编辑结果。
+          </p>
+        )}
+
+        <div className="flex flex-wrap justify-end gap-3">
+          {status && (
+            <Button asChild variant="outline">
+              <Link href={`/assets/${status.assetId}`}>查看素材详情</Link>
+            </Button>
+          )}
+          <Button disabled={!file || busy} onClick={upload}>
+            {busy ? "处理中…" : "开始上传"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
