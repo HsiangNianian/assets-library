@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { and, asc, desc, eq, inArray, lt, ne } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lt, ne, sql } from "drizzle-orm";
 import { db, sqlite } from "@/server/db";
 import {
   analysisResults,
@@ -155,20 +155,31 @@ function summaryFromRow(
   };
 }
 
-export function listPublishedAssets(cursor?: string, limit = 24): AssetPage {
+export function listPublishedAssets(
+  cursor?: string,
+  limit = 24,
+  tagQuery?: string,
+): AssetPage {
   const safeLimit = Math.min(Math.max(limit, 1), 50);
   const cursorDate = cursor ? new Date(Buffer.from(cursor, "base64url").toString()) : null;
+  const normalizedTagQuery = tagQuery?.trim().toLocaleLowerCase().slice(0, 128);
   if (cursorDate && Number.isNaN(cursorDate.getTime())) {
     throw new AppError("invalid_request", "分页游标无效。");
+  }
+  const conditions = [eq(assets.reviewStatus, "published")];
+  if (cursorDate) conditions.push(lt(assets.createdAt, cursorDate));
+  if (normalizedTagQuery) {
+    const matchingAssetIds = db
+      .select({ assetId: assetTags.assetId })
+      .from(assetTags)
+      .innerJoin(tags, eq(assetTags.tagId, tags.id))
+      .where(sql`instr(${tags.normalizedValue}, ${normalizedTagQuery}) > 0`);
+    conditions.push(inArray(assets.id, matchingAssetIds));
   }
   const rows = db
     .select()
     .from(assets)
-    .where(
-      cursorDate
-        ? and(eq(assets.reviewStatus, "published"), lt(assets.createdAt, cursorDate))
-        : eq(assets.reviewStatus, "published"),
-    )
+    .where(and(...conditions))
     .orderBy(desc(assets.createdAt))
     .limit(safeLimit + 1)
     .all();

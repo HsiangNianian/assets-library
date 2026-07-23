@@ -41,3 +41,4 @@
 - [x] T025 Playwright 验证三页主路径
 - [x] T026 通过 lint、typecheck、test、e2e 和 build
 - [x] T027 同步 OpenAPI、quickstart 与规格文档
+- [x] T028 增加仅按标签值搜索的概览栏、API 查询和回归测试
