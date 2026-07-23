@@ -4,11 +4,11 @@
   "private": true,
   "packageManager": "pnpm@11.3.0",
   "scripts": {
-    "dev": "concurrently -k -n web,worker -c cyan,magenta \"next dev\" \"tsx watch src/worker/index.ts\"",
+    "dev": "concurrently -k -n web,worker -c cyan,magenta \"next dev\" \"tsx watch --env-file=.env src/worker/index.ts\"",
     "build": "next build",
     "start": "next start",
     "start:web": "next start",
-    "start:worker": "tsx src/worker/index.ts",
+    "start:worker": "tsx --env-file=.env src/worker/index.ts",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

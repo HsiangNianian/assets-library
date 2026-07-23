@@ -2,6 +2,7 @@ import {
   claimNextJob,
   recoverStaleJobs,
 } from "@/server/repositories/assets";
+import { loadConfig } from "@/server/config";
 import { processJob } from "@/server/services/processing";
 
 const pollIntervalMs = 1_000;
@@ -15,8 +16,11 @@ process.on("SIGTERM", () => {
 });
 
 async function main() {
+  const config = loadConfig();
   recoverStaleJobs();
-  console.log("Asset processing worker started.");
+  console.log(
+    `Asset processing worker started (model: ${config.modelConfigured ? "configured" : "not configured"}, protocol: ${config.MODEL_PROTOCOL}).`,
+  );
   while (!stopping) {
     const job = claimNextJob();
     if (job) {
