@@ -15,6 +15,15 @@ paths:
               required: [file, directPublish]
               properties:
                 file: { type: string, format: binary }
+                frame:
+                  type: array
+                  description: Browser-generated JPEG keyframes; required for video and forbidden for images
+                  minItems: 1
+                  maxItems: 5
+                  items: { type: string, format: binary }
+                frameMetadata:
+                  type: string
+                  description: JSON containing durationSeconds and midpoint-quantile timestamps; required for video
                 directPublish: { type: boolean }
       responses:
         "202":
@@ -112,9 +121,10 @@ components:
         - file_too_large
         - corrupt_file
         - unsupported_video_codec
+        - invalid_video_frames
         - model_not_configured
         - model_video_unsupported
-        - model_video_public_url_required
+        - video_frames_missing
         - model_request_failed
         - model_response_invalid
         - storage_error
