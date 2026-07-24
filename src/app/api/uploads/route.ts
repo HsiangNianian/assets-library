@@ -36,6 +36,19 @@ interface ParsedUpload {
   frameMetadata: string;
 }
 
+function storageError() {
+  return new AppError("storage_error", undefined, 500);
+}
+
+function removeTemporaryFile(pathToRemove: string) {
+  try {
+    fs.rmSync(pathToRemove, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function parseMultipart(request: Request): Promise<ParsedUpload> {
   const config = loadConfig();
   const contentType = request.headers.get("content-type") ?? "";
@@ -59,10 +72,42 @@ function parseMultipart(request: Request): Promise<ParsedUpload> {
     const frames: ParsedUpload["frames"] = [];
     const temporaryPaths: string[] = [];
     const fileWrites: Promise<void>[] = [];
+    const outputs: fs.WriteStream[] = [];
     let parseError: Error | null = null;
+    let finalizing = false;
 
     const fail = (error: Error) => {
       parseError ??= error;
+    };
+
+    const finish = async () => {
+      if (finalizing) return;
+      finalizing = true;
+      const results = await Promise.allSettled(fileWrites);
+      if (results.some((result) => result.status === "rejected")) {
+        fail(storageError());
+      }
+      if (parseError || !temporaryPath || !filename || sizeBytes === 0) {
+        const cleanupSucceeded = temporaryPaths
+          .map(removeTemporaryFile)
+          .every(Boolean);
+        reject(
+          parseError ??
+            (cleanupSucceeded
+              ? new AppError("invalid_request", "请选择一个非空文件。")
+              : storageError()),
+        );
+        return;
+      }
+      resolve({
+        temporaryPath,
+        filename,
+        mimeType,
+        sizeBytes,
+        directPublish,
+        frames,
+        frameMetadata,
+      });
     };
 
     busboy.on("field", (name, value) => {
@@ -87,13 +132,22 @@ function parseMultipart(request: Request): Promise<ParsedUpload> {
         return;
       }
 
-      const nextTemporaryPath = temporaryUploadPath(crypto.randomUUID());
+      let nextTemporaryPath: string;
+      let output: fs.WriteStream;
+      try {
+        nextTemporaryPath = temporaryUploadPath(crypto.randomUUID());
+        output = fs.createWriteStream(nextTemporaryPath, { flags: "wx" });
+      } catch {
+        stream.resume();
+        fail(storageError());
+        return;
+      }
       temporaryPaths.push(nextTemporaryPath);
-      const output = fs.createWriteStream(nextTemporaryPath, { flags: "wx" });
+      outputs.push(output);
       const write = new Promise<void>((resolveWrite, rejectWrite) => {
         output.on("finish", resolveWrite);
-        output.on("error", rejectWrite);
-        stream.on("error", rejectWrite);
+        output.on("error", () => rejectWrite(storageError()));
+        stream.on("error", () => rejectWrite(storageError()));
       });
       fileWrites.push(write);
 
@@ -116,56 +170,28 @@ function parseMultipart(request: Request): Promise<ParsedUpload> {
       stream.on("limit", () => {
         fail(new AppError("file_too_large"));
       });
-      stream.on("error", fail);
-      output.on("error", fail);
+      stream.on("error", () => fail(storageError()));
+      output.on("error", () => fail(storageError()));
       stream.pipe(output);
     });
 
     busboy.on("filesLimit", () => fail(new AppError("invalid_video_frames")));
-    busboy.on("error", fail);
+    busboy.on("error", (error) => {
+      fail(error instanceof AppError ? error : new AppError("invalid_request"));
+      for (const output of outputs) output.destroy(storageError());
+      void finish();
+    });
     busboy.on("finish", () => {
-      const finish = () => {
-        if (parseError || !temporaryPath || !filename || sizeBytes === 0) {
-          for (const pathToRemove of temporaryPaths) {
-            fs.rmSync(pathToRemove, { force: true });
-          }
-          reject(
-            parseError ??
-              new AppError("invalid_request", "请选择一个非空文件。"),
-          );
-          return;
-        }
-        resolve({
-          temporaryPath,
-          filename,
-          mimeType,
-          sizeBytes,
-          directPublish,
-          frames,
-          frameMetadata,
-        });
-      };
-      if (fileWrites.length === 0) {
-        finish();
-        return;
-      }
-      void Promise.allSettled(fileWrites).then((results) => {
-        const rejected = results.find(
-          (result): result is PromiseRejectedResult =>
-            result.status === "rejected",
-        );
-        if (rejected) {
-          fail(
-            rejected.reason instanceof Error
-              ? rejected.reason
-              : new Error("File write failed."),
-          );
-        }
-        finish();
-      });
+      void finish();
     });
 
-    Readable.fromWeb(request.body as never).pipe(busboy);
+    const source = Readable.fromWeb(request.body as never);
+    source.on("error", () => {
+      fail(new AppError("invalid_request"));
+      for (const output of outputs) output.destroy(storageError());
+      void finish();
+    });
+    source.pipe(busboy);
   });
 }
 
@@ -260,11 +286,17 @@ export async function POST(request: Request) {
     });
     return Response.json(status, { status: 202 });
   } catch (error) {
-    if (parsed?.temporaryPath) fs.rmSync(parsed.temporaryPath, { force: true });
+    if (parsed?.temporaryPath) removeTemporaryFile(parsed.temporaryPath);
     for (const frame of parsed?.frames ?? []) {
-      fs.rmSync(frame.temporaryPath, { force: true });
+      removeTemporaryFile(frame.temporaryPath);
     }
-    if (storedPath) removeAssetFiles(storedPath);
+    if (storedPath) {
+      try {
+        removeAssetFiles(storedPath);
+      } catch {
+        // Preserve the original upload error; orphan cleanup can be retried.
+      }
+    }
     return errorResponse(error);
   }
 }

@@ -22,15 +22,18 @@ export function UploadForm() {
   const [busy, setBusy] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const pollControllerRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(false);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
       pollControllerRef.current?.abort();
-    },
-    [],
-  );
+    };
+  }, []);
 
   const poll = async (uploadId: string) => {
+    if (!mountedRef.current) return;
     pollControllerRef.current?.abort();
     const controller = new AbortController();
     pollControllerRef.current = controller;
@@ -51,8 +54,9 @@ export function UploadForm() {
           cache: "no-store",
           signal: controller.signal,
         });
-        if (!response.ok) return;
+        if (!response.ok || !mountedRef.current) return;
         const next = (await response.json()) as UploadStatus;
+        if (!mountedRef.current) return;
         setStatus(next);
         if (
           next.processingStatus === "completed" ||
@@ -63,7 +67,10 @@ export function UploadForm() {
         }
       }
     } catch (cause) {
-      if (!(cause instanceof DOMException && cause.name === "AbortError")) {
+      if (
+        mountedRef.current &&
+        !(cause instanceof DOMException && cause.name === "AbortError")
+      ) {
         setError("无法获取处理状态，请前往素材概览查看。");
         setBusy(false);
       }
@@ -86,12 +93,14 @@ export function UploadForm() {
       if (file.type === "video/mp4" || file.name.toLowerCase().endsWith(".mp4")) {
         setExtracting(true);
         const extracted = await extractVideoFrames(file);
+        if (!mountedRef.current) return;
         for (const frame of extracted.frames) body.append("frame", frame);
         body.append("frameMetadata", JSON.stringify(extracted.metadata));
         setExtracting(false);
       }
       body.append("directPublish", String(directPublish));
     } catch (cause) {
+      if (!mountedRef.current) return;
       setExtracting(false);
       setBusy(false);
       setError(cause instanceof Error ? cause.message : "视频关键帧提取失败。");
@@ -100,14 +109,18 @@ export function UploadForm() {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/uploads");
     xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable) setProgress(Math.round((event.loaded / event.total) * 100));
+      if (mountedRef.current && event.lengthComputable) {
+        setProgress(Math.round((event.loaded / event.total) * 100));
+      }
     };
     xhr.onerror = () => {
+      if (!mountedRef.current) return;
       setError("网络连接中断，请重试。");
       setBusy(false);
       setExtracting(false);
     };
     xhr.onload = () => {
+      if (!mountedRef.current) return;
       const payload = JSON.parse(xhr.responseText || "{}") as UploadStatus & ApiError;
       if (xhr.status !== 202) {
         setError(payload.error?.message ?? "上传失败，请检查文件。");

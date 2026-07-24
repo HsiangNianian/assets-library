@@ -425,32 +425,47 @@ export function claimNextJob(): ClaimedJob | null {
   return transaction.immediate();
 }
 
-export function completeJob(jobId: string) {
-  db.update(processingJobs)
+export function completeJob(job: Pick<ClaimedJob, "id" | "attempt">) {
+  return db
+    .update(processingJobs)
     .set({ status: "completed", updatedAt: new Date() })
-    .where(eq(processingJobs.id, jobId))
-    .run();
+    .where(
+      and(
+        eq(processingJobs.id, job.id),
+        eq(processingJobs.status, "running"),
+        eq(processingJobs.attempt, job.attempt),
+      ),
+    )
+    .run().changes;
 }
 
-export function heartbeatJob(jobId: string) {
+export function heartbeatJob(job: Pick<ClaimedJob, "id" | "attempt">) {
   const now = new Date();
   return db
     .update(processingJobs)
     .set({ claimedAt: now, updatedAt: now })
     .where(
       and(
-        eq(processingJobs.id, jobId),
+        eq(processingJobs.id, job.id),
         eq(processingJobs.status, "running"),
+        eq(processingJobs.attempt, job.attempt),
       ),
     )
     .run().changes;
 }
 
-export function failJob(jobId: string) {
-  db.update(processingJobs)
+export function failJob(job: Pick<ClaimedJob, "id" | "attempt">) {
+  return db
+    .update(processingJobs)
     .set({ status: "failed", updatedAt: new Date() })
-    .where(eq(processingJobs.id, jobId))
-    .run();
+    .where(
+      and(
+        eq(processingJobs.id, job.id),
+        eq(processingJobs.status, "running"),
+        eq(processingJobs.attempt, job.attempt),
+      ),
+    )
+    .run().changes;
 }
 
 export function recoverStaleJobs(staleAfterMs = 2 * 60_000) {

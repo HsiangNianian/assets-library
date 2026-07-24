@@ -7,6 +7,7 @@ import {
   assets,
   assetTagRejections,
   assetTags,
+  processingJobs,
   tags,
 } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
@@ -42,17 +43,69 @@ function tagsFromAnalysis(result: AnalysisResult) {
   ];
 }
 
+function advanceJobAssetStatus(
+  job: ClaimedJob,
+  processingStatus: "validating" | "analyzing",
+) {
+  const now = new Date();
+  return db.transaction((tx) => {
+    const renewed = tx
+      .update(processingJobs)
+      .set({ claimedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(processingJobs.id, job.id),
+          eq(processingJobs.status, "running"),
+          eq(processingJobs.attempt, job.attempt),
+        ),
+      )
+      .run();
+    if (renewed.changes !== 1) return false;
+    const updated = tx
+      .update(assets)
+      .set({ processingStatus, updatedAt: now })
+      .where(
+        and(
+          eq(assets.id, job.assetId),
+          eq(assets.reviewStatus, "pending_review"),
+        ),
+      )
+      .run();
+    return updated.changes === 1;
+  });
+}
+
 function persistAnalysis(
-  assetId: string,
+  job: ClaimedJob,
   result: AnalysisResult,
   protocol: string,
   modelName: string,
 ) {
   const now = new Date();
-  db.transaction((tx) => {
+  return db.transaction((tx) => {
+    const completed = tx
+      .update(processingJobs)
+      .set({ status: "completed", updatedAt: now })
+      .where(
+        and(
+          eq(processingJobs.id, job.id),
+          eq(processingJobs.status, "running"),
+          eq(processingJobs.attempt, job.attempt),
+        ),
+      )
+      .run();
+    if (completed.changes !== 1) return false;
+
+    const asset = tx
+      .select()
+      .from(assets)
+      .where(eq(assets.id, job.assetId))
+      .get();
+    if (!asset || asset.reviewStatus === "deleted") return true;
+
     tx.insert(analysisResults)
       .values({
-        assetId,
+        assetId: job.assetId,
         schemaVersion: 1,
         resultJson: JSON.stringify(result),
         modelProtocol: protocol,
@@ -73,7 +126,7 @@ function persistAnalysis(
     const rejected = tx
       .select()
       .from(assetTagRejections)
-      .where(eq(assetTagRejections.assetId, assetId))
+      .where(eq(assetTagRejections.assetId, job.assetId))
       .all();
     const rejectedKeys = new Set(
       rejected.map((item) => `${item.category}:${item.normalizedValue}`),
@@ -104,37 +157,63 @@ function persistAnalysis(
           .run();
       }
       tx.insert(assetTags)
-        .values({ assetId, tagId, source: "model", confidence: null })
+        .values({
+          assetId: job.assetId,
+          tagId,
+          source: "model",
+          confidence: null,
+        })
         .onConflictDoNothing()
         .run();
     }
-    const asset = tx.select().from(assets).where(eq(assets.id, assetId)).get();
     tx.update(assets)
       .set({
-        description: asset?.description || result.description,
+        description: asset.description || result.description,
         processingStatus: "completed",
-        reviewStatus: asset?.directPublish ? "published" : "pending_review",
+        reviewStatus: asset.directPublish ? "published" : "pending_review",
         failureCode: null,
         failureMessage: null,
         updatedAt: now,
       })
-      .where(eq(assets.id, assetId))
+      .where(eq(assets.id, job.assetId))
       .run();
+    return true;
   });
 }
 
-function markAssetFailed(assetId: string, error: unknown) {
+function failJobAndMarkAsset(job: ClaimedJob, error: unknown) {
   const appError =
     error instanceof AppError ? error : new AppError("internal_error");
-  db.update(assets)
-    .set({
-      processingStatus: "failed",
-      failureCode: appError.code satisfies FailureCode,
-      failureMessage: appError.message,
-      updatedAt: new Date(),
-    })
-    .where(eq(assets.id, assetId))
-    .run();
+  const now = new Date();
+  return db.transaction((tx) => {
+    const failed = tx
+      .update(processingJobs)
+      .set({ status: "failed", updatedAt: now })
+      .where(
+        and(
+          eq(processingJobs.id, job.id),
+          eq(processingJobs.status, "running"),
+          eq(processingJobs.attempt, job.attempt),
+        ),
+      )
+      .run();
+    if (failed.changes !== 1) return false;
+    tx.update(assets)
+      .set({
+        processingStatus: "failed",
+        failureCode: appError.code satisfies FailureCode,
+        failureMessage: appError.message,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(assets.id, job.assetId),
+          eq(assets.reviewStatus, "pending_review"),
+        ),
+      )
+      .run();
+    return true;
+  });
 }
 
 export async function processJob(
@@ -143,29 +222,36 @@ export async function processJob(
 ) {
   const asset = getAssetRecord(job.assetId);
   if (!asset) {
-    failJob(job.id);
+    failJob(job);
     return;
   }
-  const heartbeat = setInterval(() => heartbeatJob(job.id), 30_000);
+  const heartbeat = setInterval(() => {
+    try {
+      heartbeatJob(job);
+    } catch (error) {
+      console.error("Processing job heartbeat failed.", error);
+    }
+  }, 30_000);
   heartbeat.unref();
   try {
     if (job.type === "cleanup") {
+      if (heartbeatJob(job) !== 1) return;
       removeAssetFiles(asset.originalPath);
-      completeJob(job.id);
+      completeJob(job);
       return;
     }
     if (asset.reviewStatus === "deleted") {
-      completeJob(job.id);
+      completeJob(job);
       return;
     }
-    db.update(assets)
-      .set({ processingStatus: "validating", updatedAt: new Date() })
-      .where(eq(assets.id, asset.id))
-      .run();
-    db.update(assets)
-      .set({ processingStatus: "analyzing", updatedAt: new Date() })
-      .where(eq(assets.id, asset.id))
-      .run();
+    if (!advanceJobAssetStatus(job, "validating")) {
+      completeJob(job);
+      return;
+    }
+    if (!advanceJobAssetStatus(job, "analyzing")) {
+      completeJob(job);
+      return;
+    }
     const result = await analyzer.analyze({
       assetId: asset.id,
       mediaType: asset.mediaType,
@@ -174,15 +260,13 @@ export async function processJob(
     });
     const config = loadConfig();
     persistAnalysis(
-      asset.id,
+      job,
       result,
       config.MODEL_PROTOCOL,
       config.MODEL_NAME ?? "unknown",
     );
-    completeJob(job.id);
   } catch (error) {
-    markAssetFailed(asset.id, error);
-    failJob(job.id);
+    failJobAndMarkAsset(job, error);
   } finally {
     clearInterval(heartbeat);
   }

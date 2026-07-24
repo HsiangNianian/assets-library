@@ -252,7 +252,7 @@ describe("complete asset processing flow", () => {
 
     const claimed = repository.claimNextJob();
     expect(claimed?.assetId).toBe(assetId);
-    expect(repository.heartbeatJob(claimed!.id)).toBe(1);
+    expect(repository.heartbeatJob(claimed!)).toBe(1);
     expect(
       repository
         .listAssets({
