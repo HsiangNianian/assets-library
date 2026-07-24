@@ -72,7 +72,7 @@ describe("complete asset processing flow", () => {
       sizeBytes: stat.size,
       directPublish: false,
     });
-    expect(repository.listAssets().items).toEqual([
+    expect(repository.listAssets({ view: "pending" }).items).toEqual([
       expect.objectContaining({
         id: assetId,
         processingStatus: "queued",
@@ -115,10 +115,26 @@ describe("complete asset processing flow", () => {
     ]);
     detail = repository.publishAsset(assetId);
     expect(detail.reviewStatus).toBe("published");
-    expect(repository.listAssets().items).toHaveLength(1);
-    expect(repository.listAssets(undefined, 24, "展").items).toHaveLength(1);
-    expect(repository.listAssets(undefined, 24, "活动").items).toHaveLength(0);
-    expect(repository.listAssets(undefined, 24, "人工").items).toHaveLength(0);
+    expect(repository.listAssets({ view: "pending" }).items).toHaveLength(0);
+    expect(repository.listAssets({ view: "published" }).items).toHaveLength(1);
+    expect(
+      repository.listAssets({
+        view: "published",
+        tagQuery: "展",
+      }).items,
+    ).toHaveLength(1);
+    expect(
+      repository.listAssets({
+        view: "published",
+        tagQuery: "活动",
+      }).items,
+    ).toHaveLength(0);
+    expect(
+      repository.listAssets({
+        view: "published",
+        tagQuery: "人工",
+      }).items,
+    ).toHaveLength(0);
 
     const partial = media.mediaResponse(
       assetId,
@@ -227,6 +243,14 @@ describe("complete asset processing flow", () => {
     const claimed = repository.claimNextJob();
     expect(claimed?.assetId).toBe(assetId);
     expect(repository.heartbeatJob(claimed!.id)).toBe(1);
+    expect(
+      repository
+        .listAssets({
+        view: "pending",
+        tagQuery: "不会过滤待入库素材",
+        })
+        .items.some((item) => item.id === assetId),
+    ).toBe(true);
     database.db
       .update(schema.processingJobs)
       .set({ claimedAt: new Date(Date.now() - 180_000) })
@@ -238,5 +262,46 @@ describe("complete asset processing flow", () => {
       assetId,
       attempt: 2,
     });
+  });
+
+  it("paginates each overview view with eight assets per page", async () => {
+    const [repository] = await Promise.all([
+      import("@/server/repositories/assets"),
+    ]);
+    const before = repository.listAssets({ view: "pending" }).total;
+    for (let index = 0; index < 9; index += 1) {
+      repository.createAsset({
+        assetId: crypto.randomUUID(),
+        uploadId: crypto.randomUUID(),
+        name: `pagination-${index}`,
+        originalFilename: `pagination-${index}.jpg`,
+        originalPath: `pagination-${index}/original.jpg`,
+        mimeType: "image/jpeg",
+        declaredMime: "image/jpeg",
+        mediaType: "image",
+        sizeBytes: 5,
+        directPublish: false,
+      });
+    }
+
+    const firstPage = repository.listAssets({
+      view: "pending",
+      page: 1,
+      limit: 8,
+    });
+    const secondPage = repository.listAssets({
+      view: "pending",
+      page: 2,
+      limit: 8,
+    });
+    expect(firstPage.items).toHaveLength(8);
+    expect(firstPage.pageSize).toBe(8);
+    expect(firstPage.total).toBe(before + 9);
+    expect(secondPage.items.length).toBeGreaterThan(0);
+    expect(
+      firstPage.items.some((item) =>
+        secondPage.items.some((next) => next.id === item.id),
+      ),
+    ).toBe(false);
   });
 });
