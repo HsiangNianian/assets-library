@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, FileVideo2, ImageIcon, UploadCloud, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -21,17 +21,55 @@ export function UploadForm() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [extracting, setExtracting] = useState(false);
+  const pollControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(
+    () => () => {
+      pollControllerRef.current?.abort();
+    },
+    [],
+  );
 
   const poll = async (uploadId: string) => {
-    for (;;) {
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      const response = await fetch(`/api/uploads/${uploadId}`, { cache: "no-store" });
-      if (!response.ok) return;
-      const next = (await response.json()) as UploadStatus;
-      setStatus(next);
-      if (next.processingStatus === "completed" || next.processingStatus === "failed") {
+    pollControllerRef.current?.abort();
+    const controller = new AbortController();
+    pollControllerRef.current = controller;
+    try {
+      for (;;) {
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => {
+            window.clearTimeout(timer);
+            reject(new DOMException("Polling stopped.", "AbortError"));
+          };
+          const timer = window.setTimeout(() => {
+            controller.signal.removeEventListener("abort", onAbort);
+            resolve();
+          }, 1_000);
+          controller.signal.addEventListener("abort", onAbort, { once: true });
+        });
+        const response = await fetch(`/api/uploads/${uploadId}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!response.ok) return;
+        const next = (await response.json()) as UploadStatus;
+        setStatus(next);
+        if (
+          next.processingStatus === "completed" ||
+          next.processingStatus === "failed"
+        ) {
+          setBusy(false);
+          return;
+        }
+      }
+    } catch (cause) {
+      if (!(cause instanceof DOMException && cause.name === "AbortError")) {
+        setError("无法获取处理状态，请前往素材概览查看。");
         setBusy(false);
-        return;
+      }
+    } finally {
+      if (pollControllerRef.current === controller) {
+        pollControllerRef.current = null;
       }
     }
   };

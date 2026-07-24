@@ -1,5 +1,5 @@
 import { errorResponse } from "@/server/errors";
-import { listPublishedAssets } from "@/server/repositories/assets";
+import { listAssets } from "@/server/repositories/assets";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,7 +11,7 @@ export async function GET(request: Request) {
     const tagQuery = url.searchParams.get("tag") ?? undefined;
     const limit = Number.parseInt(url.searchParams.get("limit") ?? "24", 10);
     return Response.json(
-      listPublishedAssets(
+      listAssets(
         cursor,
         Number.isNaN(limit) ? 24 : limit,
         tagQuery,

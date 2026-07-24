@@ -155,7 +155,7 @@ function summaryFromRow(
   };
 }
 
-export function listPublishedAssets(
+export function listAssets(
   cursor?: string,
   limit = 24,
   tagQuery?: string,
@@ -166,7 +166,7 @@ export function listPublishedAssets(
   if (cursorDate && Number.isNaN(cursorDate.getTime())) {
     throw new AppError("invalid_request", "分页游标无效。");
   }
-  const conditions = [eq(assets.reviewStatus, "published")];
+  const conditions = [ne(assets.reviewStatus, "deleted")];
   if (cursorDate) conditions.push(lt(assets.createdAt, cursorDate));
   if (normalizedTagQuery) {
     const matchingAssetIds = db
@@ -410,6 +410,20 @@ export function completeJob(jobId: string) {
     .run();
 }
 
+export function heartbeatJob(jobId: string) {
+  const now = new Date();
+  return db
+    .update(processingJobs)
+    .set({ claimedAt: now, updatedAt: now })
+    .where(
+      and(
+        eq(processingJobs.id, jobId),
+        eq(processingJobs.status, "running"),
+      ),
+    )
+    .run().changes;
+}
+
 export function failJob(jobId: string) {
   db.update(processingJobs)
     .set({ status: "failed", updatedAt: new Date() })
@@ -417,10 +431,11 @@ export function failJob(jobId: string) {
     .run();
 }
 
-export function recoverStaleJobs() {
-  const stale = new Date(Date.now() - 10 * 60_000);
-  db.update(processingJobs)
+export function recoverStaleJobs(staleAfterMs = 2 * 60_000) {
+  const stale = new Date(Date.now() - staleAfterMs);
+  return db
+    .update(processingJobs)
     .set({ status: "queued", claimedAt: null, availableAt: new Date(), updatedAt: new Date() })
     .where(and(eq(processingJobs.status, "running"), lt(processingJobs.claimedAt, stale)))
-    .run();
+    .run().changes;
 }

@@ -158,10 +158,15 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
       try {
         const isChat = this.config.MODEL_PROTOCOL === "openai_chat_completions";
         const endpoint = isChat ? "chat/completions" : "responses";
+        const thinking =
+          this.config.modelEnableThinking === null
+            ? {}
+            : { enable_thinking: this.config.modelEnableThinking };
         const body = isChat
           ? {
               model: this.config.MODEL_NAME,
               temperature: 0,
+              ...thinking,
               messages: [
                 {
                   role: "user",
@@ -171,6 +176,7 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
             }
           : {
               model: this.config.MODEL_NAME,
+              ...thinking,
               input: [
                 {
                   role: "user",

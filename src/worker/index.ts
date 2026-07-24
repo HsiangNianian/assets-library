@@ -6,6 +6,7 @@ import { loadConfig } from "@/server/config";
 import { processJob } from "@/server/services/processing";
 
 const pollIntervalMs = 1_000;
+const recoveryIntervalMs = 30_000;
 let stopping = false;
 
 process.on("SIGINT", () => {
@@ -18,6 +19,12 @@ process.on("SIGTERM", () => {
 async function main() {
   const config = loadConfig();
   recoverStaleJobs();
+  const recoveryTimer = setInterval(() => {
+    const recovered = recoverStaleJobs();
+    if (recovered > 0) {
+      console.log(`Recovered ${recovered} stale processing job(s).`);
+    }
+  }, recoveryIntervalMs);
   console.log(
     `Asset processing worker started (model: ${config.modelConfigured ? "configured" : "not configured"}, protocol: ${config.MODEL_PROTOCOL}).`,
   );
@@ -29,6 +36,7 @@ async function main() {
     }
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
   }
+  clearInterval(recoveryTimer);
   console.log("Asset processing worker stopped.");
 }
 

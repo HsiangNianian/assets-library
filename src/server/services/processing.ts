@@ -19,6 +19,7 @@ import {
   completeJob,
   failJob,
   getAssetRecord,
+  heartbeatJob,
   type ClaimedJob,
 } from "@/server/repositories/assets";
 import type { AnalysisResult, FailureCode } from "@/shared/contracts";
@@ -145,6 +146,8 @@ export async function processJob(
     failJob(job.id);
     return;
   }
+  const heartbeat = setInterval(() => heartbeatJob(job.id), 30_000);
+  heartbeat.unref();
   try {
     if (job.type === "cleanup") {
       removeAssetFiles(asset.originalPath);
@@ -180,5 +183,7 @@ export async function processJob(
   } catch (error) {
     markAssetFailed(asset.id, error);
     failJob(job.id);
+  } finally {
+    clearInterval(heartbeat);
   }
 }

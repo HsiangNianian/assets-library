@@ -1,11 +1,10 @@
 import Link from "next/link";
 import { ArrowRight, Images, Search, X } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { MediaPreview } from "@/components/media-preview";
-import { listPublishedAssets } from "@/server/repositories/assets";
+import { AssetOverviewGrid } from "@/components/asset-overview-grid";
+import { listAssets } from "@/server/repositories/assets";
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +18,7 @@ export default async function OverviewPage({
     ? parameters.tag[0]
     : parameters.tag;
   const tagQuery = rawTagQuery?.trim().slice(0, 128) ?? "";
-  const page = listPublishedAssets(undefined, 24, tagQuery);
+  const page = listAssets(undefined, 24, tagQuery);
   return (
     <main className="mx-auto max-w-7xl px-5 py-10">
       <section className="mb-9 flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
@@ -31,7 +30,7 @@ export default async function OverviewPage({
             素材概览
           </h1>
           <p className="mt-3 max-w-2xl text-slate-600">
-            集中查看已经完成分析和正式入库的图片与视频素材。
+            上传成功的素材会立即出现在这里，可查看处理状态并完成入库。
           </p>
         </div>
         <Button asChild size="lg">
@@ -89,8 +88,8 @@ export default async function OverviewPage({
             </h2>
             <p className="mt-2 max-w-md text-sm text-slate-500">
               {tagQuery
-                ? `没有已入库素材的标签包含“${tagQuery}”。`
-                : "上传第一份 JPEG、PNG、WebP 图片或 H.264 MP4 视频，完成分析后即可在这里管理。"}
+                ? `没有素材的标签包含“${tagQuery}”。`
+                : "上传第一份 JPEG、PNG、WebP 图片或 H.264 MP4 视频后，即可在这里跟踪处理状态。"}
             </p>
             {tagQuery ? (
               <Button asChild variant="outline" className="mt-6">
@@ -104,38 +103,7 @@ export default async function OverviewPage({
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {page.items.map((asset) => (
-            <Link href={`/assets/${asset.id}`} key={asset.id}>
-              <Card className="group h-full overflow-hidden transition hover:-translate-y-0.5 hover:shadow-lg">
-                <div className="aspect-[4/3] overflow-hidden bg-slate-100">
-                  <MediaPreview
-                    mediaType={asset.mediaType}
-                    src={asset.mediaUrl}
-                    name={asset.name}
-                    className="transition duration-300 group-hover:scale-[1.02]"
-                  />
-                </div>
-                <CardContent className="space-y-3 pt-5">
-                  <div className="flex items-center justify-between gap-3">
-                    <h2 className="truncate font-semibold">{asset.name}</h2>
-                    <Badge>{asset.mediaType === "image" ? "图片" : "视频"}</Badge>
-                  </div>
-                  <p className="line-clamp-2 min-h-10 text-sm text-slate-500">
-                    {asset.description || "暂无描述"}
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {asset.tags.slice(0, 3).map((tag) => (
-                      <Badge key={`${tag.category}-${tag.value}`}>
-                        {tag.value}
-                      </Badge>
-                    ))}
-                  </div>
-                </CardContent>
-              </Card>
-            </Link>
-          ))}
-        </div>
+        <AssetOverviewGrid assets={page.items} />
       )}
     </main>
   );

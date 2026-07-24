@@ -16,6 +16,7 @@ const envSchema = z.object({
   MODEL_VIDEO_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
   MODEL_RETRY_COUNT: z.coerce.number().int().min(0).max(3).default(1),
   MODEL_VIDEO_MODE: z.enum(["disabled", "frames"]).default("frames"),
+  MODEL_ENABLE_THINKING: z.enum(["true", "false"]).optional(),
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;
@@ -31,5 +32,11 @@ export function loadConfig(
     modelConfigured: Boolean(
       parsed.MODEL_BASE_URL && parsed.MODEL_API_KEY && parsed.MODEL_NAME,
     ),
+    modelEnableThinking:
+      parsed.MODEL_ENABLE_THINKING !== undefined
+        ? parsed.MODEL_ENABLE_THINKING === "true"
+        : /^qwen3\.[5-9]/i.test(parsed.MODEL_NAME ?? "")
+          ? false
+          : null,
   };
 }
