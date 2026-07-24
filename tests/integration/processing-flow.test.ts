@@ -72,6 +72,13 @@ describe("complete asset processing flow", () => {
       sizeBytes: stat.size,
       directPublish: false,
     });
+    expect(repository.listAssets().items).toEqual([
+      expect.objectContaining({
+        id: assetId,
+        processingStatus: "queued",
+        reviewStatus: "pending_review",
+      }),
+    ]);
 
     const analyzer: MultimodalAnalyzer = {
       async analyze() {
@@ -108,10 +115,10 @@ describe("complete asset processing flow", () => {
     ]);
     detail = repository.publishAsset(assetId);
     expect(detail.reviewStatus).toBe("published");
-    expect(repository.listPublishedAssets().items).toHaveLength(1);
-    expect(repository.listPublishedAssets(undefined, 24, "展").items).toHaveLength(1);
-    expect(repository.listPublishedAssets(undefined, 24, "活动").items).toHaveLength(0);
-    expect(repository.listPublishedAssets(undefined, 24, "人工").items).toHaveLength(0);
+    expect(repository.listAssets().items).toHaveLength(1);
+    expect(repository.listAssets(undefined, 24, "展").items).toHaveLength(1);
+    expect(repository.listAssets(undefined, 24, "活动").items).toHaveLength(0);
+    expect(repository.listAssets(undefined, 24, "人工").items).toHaveLength(0);
 
     const partial = media.mediaResponse(
       assetId,
@@ -185,6 +192,51 @@ describe("complete asset processing flow", () => {
       visualSegments: [{ summary: "展示产品外观" }],
       keyMoments: [{ summary: "出现产品名称" }],
       timeline: [{ summary: "完成一次演示" }],
+    });
+  });
+
+  it("heartbeats active jobs and recovers jobs whose worker disappeared", async () => {
+    const [storage, repository, database, schema] = await Promise.all([
+      import("@/server/media/storage"),
+      import("@/server/repositories/assets"),
+      import("@/server/db"),
+      import("@/server/db/schema"),
+    ]);
+    const { eq } = await import("drizzle-orm");
+    const assetId = crypto.randomUUID();
+    const temporaryPath = storage.temporaryUploadPath("recovery-upload");
+    await fs.writeFile(temporaryPath, "image");
+    const originalPath = storage.moveIntoAssetStorage(
+      temporaryPath,
+      assetId,
+      ".jpg",
+    );
+    repository.createAsset({
+      assetId,
+      uploadId: crypto.randomUUID(),
+      name: "recovery",
+      originalFilename: "recovery.jpg",
+      originalPath,
+      mimeType: "image/jpeg",
+      declaredMime: "image/jpeg",
+      mediaType: "image",
+      sizeBytes: 5,
+      directPublish: false,
+    });
+
+    const claimed = repository.claimNextJob();
+    expect(claimed?.assetId).toBe(assetId);
+    expect(repository.heartbeatJob(claimed!.id)).toBe(1);
+    database.db
+      .update(schema.processingJobs)
+      .set({ claimedAt: new Date(Date.now() - 180_000) })
+      .where(eq(schema.processingJobs.id, claimed!.id))
+      .run();
+    expect(repository.recoverStaleJobs(120_000)).toBe(1);
+    expect(repository.claimNextJob()).toMatchObject({
+      id: claimed!.id,
+      assetId,
+      attempt: 2,
     });
   });
 });

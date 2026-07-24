@@ -27,7 +27,7 @@ describe("model adapter", () => {
     process.env.MODEL_PROTOCOL = "openai_chat_completions";
     process.env.MODEL_BASE_URL = "https://proxy.example/v1";
     process.env.MODEL_API_KEY = "secret";
-    process.env.MODEL_NAME = "vision-model";
+    process.env.MODEL_NAME = "qwen3.7-plus";
     await fs.mkdir(path.join(root, "a"));
     await fs.writeFile(path.join(root, "a", "original.png"), "image");
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -66,6 +66,11 @@ describe("model adapter", () => {
       "https://proxy.example/v1/chat/completions",
       expect.objectContaining({ method: "POST" }),
     );
+    const request = vi.mocked(fetch).mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      model: "qwen3.7-plus",
+      enable_thinking: false,
+    });
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -130,6 +135,7 @@ describe("model adapter", () => {
 
     const request = fetchMock.mock.calls[0]?.[1];
     const body = JSON.parse(String(request?.body)) as {
+      enable_thinking?: boolean;
       messages: Array<{
         content: Array<{
           type: string;
@@ -138,6 +144,7 @@ describe("model adapter", () => {
         }>;
       }>;
     };
+    expect(body.enable_thinking).toBe(false);
     const content = body.messages[0]?.content ?? [];
     expect(content.filter((item) => item.type === "image_url")).toHaveLength(2);
     expect(content[1]?.text).toContain("0.5 秒");
