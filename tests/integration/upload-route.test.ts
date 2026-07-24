@@ -84,4 +84,80 @@ describe("streaming upload route", () => {
       error: { code: "multiple_files" },
     });
   });
+
+  it("accepts one MP4 with sampled JPEG frames and rejects missing frames", async () => {
+    const { POST } = await import("@/app/api/uploads/route");
+    const mp4 = Buffer.from("\0\0\0\u0018ftypisom____avc1", "latin1");
+    const jpeg = await sharp({
+      create: {
+        width: 8,
+        height: 6,
+        channels: 3,
+        background: "#f59e0b",
+      },
+    })
+      .jpeg()
+      .toBuffer();
+    const mp4Bytes = new ArrayBuffer(mp4.byteLength);
+    new Uint8Array(mp4Bytes).set(mp4);
+    const jpegBytes = new ArrayBuffer(jpeg.byteLength);
+    new Uint8Array(jpegBytes).set(jpeg);
+
+    const validBody = new FormData();
+    validBody.append(
+      "file",
+      new File([mp4Bytes], "clip.mp4", { type: "video/mp4" }),
+    );
+    validBody.append(
+      "frame",
+      new File([jpegBytes], "frame-01.jpg", { type: "image/jpeg" }),
+    );
+    validBody.append(
+      "frame",
+      new File([jpegBytes], "frame-02.jpg", { type: "image/jpeg" }),
+    );
+    validBody.append(
+      "frameMetadata",
+      JSON.stringify({ durationSeconds: 2, timestamps: [0.5, 1.5] }),
+    );
+    validBody.append("directPublish", "false");
+    const accepted = await POST(
+      new Request("http://localhost/api/uploads", {
+        method: "POST",
+        body: validBody,
+      }),
+    );
+    expect(accepted.status).toBe(202);
+    const upload = (await accepted.json()) as { assetId: string };
+    const manifest = JSON.parse(
+      await fs.readFile(
+        path.join(
+          process.env.MEDIA_ROOT!,
+          upload.assetId,
+          "frames",
+          "manifest.json",
+        ),
+        "utf8",
+      ),
+    ) as { durationSeconds: number; frames: unknown[] };
+    expect(manifest).toMatchObject({ durationSeconds: 2 });
+    expect(manifest.frames).toHaveLength(2);
+
+    const missingFramesBody = new FormData();
+    missingFramesBody.append(
+      "file",
+      new File([mp4Bytes], "missing.mp4", { type: "video/mp4" }),
+    );
+    missingFramesBody.append("directPublish", "false");
+    const rejected = await POST(
+      new Request("http://localhost/api/uploads", {
+        method: "POST",
+        body: missingFramesBody,
+      }),
+    );
+    expect(rejected.status).toBe(400);
+    await expect(rejected.json()).resolves.toMatchObject({
+      error: { code: "invalid_video_frames" },
+    });
+  });
 });

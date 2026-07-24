@@ -75,7 +75,6 @@ describe("model adapter", () => {
       MODEL_BASE_URL: "https://proxy.example/v1",
       MODEL_API_KEY: "secret",
       MODEL_NAME: "vision-model",
-      MEDIA_SIGNING_SECRET: "test-secret-at-least-16-characters",
     });
     await expect(
       new OpenAICompatibleAnalyzer(config).analyze({
@@ -87,21 +86,31 @@ describe("model adapter", () => {
     ).rejects.toMatchObject({ code: "model_video_unsupported" });
   });
 
-  it("sends a small video as Base64 with one frame per second", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "asset-video-base64-"));
+  it("sends persisted video frames with their timestamps", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "asset-video-frames-"));
     const assetDirectory = path.join(root, "video");
-    await fs.mkdir(assetDirectory);
-    await fs.writeFile(path.join(assetDirectory, "original.mp4"), "small-video");
+    const frameDirectory = path.join(assetDirectory, "frames");
+    await fs.mkdir(frameDirectory, { recursive: true });
+    await fs.writeFile(path.join(assetDirectory, "original.mp4"), "video");
+    await fs.writeFile(path.join(frameDirectory, "frame-01.jpg"), "frame-one");
+    await fs.writeFile(path.join(frameDirectory, "frame-02.jpg"), "frame-two");
+    await fs.writeFile(
+      path.join(frameDirectory, "manifest.json"),
+      JSON.stringify({
+        durationSeconds: 2,
+        frames: [
+          { filename: "frame-01.jpg", timestampSeconds: 0.5 },
+          { filename: "frame-02.jpg", timestampSeconds: 1.5 },
+        ],
+      }),
+    );
     const config = loadConfig({
       MEDIA_ROOT: root,
       MODEL_PROTOCOL: "openai_chat_completions",
       MODEL_BASE_URL: "https://proxy.example/v1",
       MODEL_API_KEY: "secret",
       MODEL_NAME: "qwen3.7-plus",
-      MODEL_VIDEO_MODE: "auto",
-      MODEL_VIDEO_FPS: "1",
-      APP_PUBLIC_URL: "https://assets.example",
-      MEDIA_SIGNING_SECRET: "test-secret-at-least-16-characters",
+      MODEL_VIDEO_MODE: "frames",
     });
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
@@ -124,77 +133,34 @@ describe("model adapter", () => {
       messages: Array<{
         content: Array<{
           type: string;
-          video_url?: { url: string; fps: number };
+          image_url?: { url: string };
           text?: string;
         }>;
       }>;
     };
-    const media = body.messages[0]?.content[1];
-    expect(media?.video_url?.url).toMatch(/^data:video\/mp4;base64,/);
-    expect(media?.video_url?.fps).toBe(1);
-    expect(body.messages[0]?.content[0]?.text).toContain("不分析音轨");
+    const content = body.messages[0]?.content ?? [];
+    expect(content.filter((item) => item.type === "image_url")).toHaveLength(2);
+    expect(content[1]?.text).toContain("0.5 秒");
+    expect(content[2]?.image_url?.url).toMatch(/^data:image\/jpeg;base64,/);
+    expect(content[3]?.text).toContain("1.5 秒");
+    expect(content[4]?.image_url?.url).toMatch(/^data:image\/jpeg;base64,/);
+    expect(content[0]?.text).toContain("不分析音轨");
     expect(result).not.toHaveProperty("transcript");
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("uses a signed public URL at the 7 MiB boundary", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "asset-video-url-"));
+  it("fails clearly when persisted video frames are missing", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "asset-video-missing-"));
     const assetDirectory = path.join(root, "video");
     await fs.mkdir(assetDirectory);
-    await fs.writeFile(
-      path.join(assetDirectory, "original.mp4"),
-      Buffer.alloc(7 * 1024 * 1024),
-    );
+    await fs.writeFile(path.join(assetDirectory, "original.mp4"), "video");
     const config = loadConfig({
       MEDIA_ROOT: root,
       MODEL_PROTOCOL: "openai_chat_completions",
       MODEL_BASE_URL: "https://proxy.example/v1",
       MODEL_API_KEY: "secret",
       MODEL_NAME: "qwen3.7-plus",
-      MODEL_VIDEO_MODE: "auto",
-      APP_PUBLIC_URL: "https://assets.example",
-      MEDIA_SIGNING_SECRET: "test-secret-at-least-16-characters",
-    });
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          choices: [{ message: { content: JSON.stringify(videoAnalysis) } }],
-        }),
-        { status: 200 },
-      ),
-    );
-
-    await new OpenAICompatibleAnalyzer(config).analyze({
-      assetId: "video",
-      mediaType: "video",
-      mimeType: "video/mp4",
-      relativePath: "video/original.mp4",
-    });
-
-    const request = fetchMock.mock.calls[0]?.[1];
-    expect(String(request?.body)).toContain(
-      "https://assets.example/api/model-media/",
-    );
-    expect(String(request?.body)).not.toContain("data:video/mp4;base64,");
-    await fs.rm(root, { recursive: true, force: true });
-  });
-
-  it("requires a public URL for videos at least 7 MiB", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "asset-video-large-"));
-    const assetDirectory = path.join(root, "video");
-    await fs.mkdir(assetDirectory);
-    await fs.writeFile(
-      path.join(assetDirectory, "original.mp4"),
-      Buffer.alloc(7 * 1024 * 1024),
-    );
-    const config = loadConfig({
-      MEDIA_ROOT: root,
-      MODEL_PROTOCOL: "openai_chat_completions",
-      MODEL_BASE_URL: "https://proxy.example/v1",
-      MODEL_API_KEY: "secret",
-      MODEL_NAME: "qwen3.7-plus",
-      MODEL_VIDEO_MODE: "auto",
-      MEDIA_SIGNING_SECRET: "test-secret-at-least-16-characters",
+      MODEL_VIDEO_MODE: "frames",
     });
 
     await expect(
@@ -204,7 +170,7 @@ describe("model adapter", () => {
         mimeType: "video/mp4",
         relativePath: "video/original.mp4",
       }),
-    ).rejects.toMatchObject({ code: "model_video_public_url_required" });
+    ).rejects.toMatchObject({ code: "video_frames_missing" });
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -215,7 +181,6 @@ describe("model adapter", () => {
       MODEL_API_KEY: "secret",
       MODEL_NAME: "qwen3.7-plus",
       MODEL_VIDEO_MODE: "disabled",
-      MEDIA_SIGNING_SECRET: "test-secret-at-least-16-characters",
     });
 
     await expect(
@@ -239,7 +204,6 @@ describe("model adapter", () => {
       MODEL_BASE_URL: "https://proxy.example/v1",
       MODEL_API_KEY: "secret",
       MODEL_NAME: "vision-model",
-      MEDIA_SIGNING_SECRET: "test-secret-at-least-16-characters",
     });
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
