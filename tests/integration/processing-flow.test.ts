@@ -14,6 +14,8 @@ describe("complete asset processing flow", () => {
     process.env.MEDIA_ROOT = path.join(directory, "media");
     process.env.MODEL_PROTOCOL = "openai_chat_completions";
     process.env.MODEL_NAME = "test-model";
+    const { initializeDatabase } = await import("@/server/db/migrations");
+    initializeDatabase(process.env.DATABASE_PATH).sqlite.close();
   });
 
   afterAll(async () => {

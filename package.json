@@ -15,7 +15,7 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx src/server/db/migrate.ts"
+    "db:migrate": "tsx --env-file=.env src/server/db/migrate.ts"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.3",

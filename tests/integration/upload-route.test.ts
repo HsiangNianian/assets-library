@@ -11,6 +11,8 @@ describe("streaming upload route", () => {
     directory = await fs.mkdtemp(path.join(os.tmpdir(), "asset-upload-route-"));
     process.env.DATABASE_PATH = path.join(directory, "assets.db");
     process.env.MEDIA_ROOT = path.join(directory, "media");
+    const { initializeDatabase } = await import("@/server/db/migrations");
+    initializeDatabase(process.env.DATABASE_PATH).sqlite.close();
   });
 
   afterAll(async () => {

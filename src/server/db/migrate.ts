@@ -1,5 +1,6 @@
-import { openDatabase } from "./index";
+import { loadConfig } from "@/server/config";
+import { initializeDatabase } from "./migrations";
 
-const { sqlite } = openDatabase(process.env.DATABASE_PATH);
+const { sqlite } = initializeDatabase(loadConfig().databasePath);
 sqlite.close();
 console.log("Database schema is up to date.");
