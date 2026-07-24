@@ -20,6 +20,10 @@ pnpm dev
 
 打开 <http://localhost:3000>。开发命令会同时启动 Web 和后台 worker。
 
+数据库结构以 `src/server/db/schema.ts` 为来源，由 Drizzle migration
+负责创建和升级。Web 与 worker 只打开、配置并复用数据库连接，不会在启动时隐式建表；
+首次运行或拉取包含新迁移的代码后，需要先执行 `pnpm db:migrate`。
+
 ## 模型配置
 
 设置 `MODEL_PROTOCOL` 为：

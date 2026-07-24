@@ -21,7 +21,7 @@ src/
 ├── app/                    # 三个页面与 Route Handlers
 ├── components/             # shadcn 风格组件与媒体预览
 ├── server/
-│   ├── db/                 # Drizzle schema、SQLite 初始化
+│   ├── db/                 # Drizzle schema、显式迁移、连接与应用单例
 │   ├── media/              # 校验、关键帧存储、Range
 │   ├── model/              # 两种 OpenAI 兼容协议
 │   ├── repositories/       # 素材、标签、任务持久化
