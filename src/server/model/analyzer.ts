@@ -1,8 +1,10 @@
 import fs from "node:fs/promises";
 import { loadConfig, type AppConfig } from "@/server/config";
 import { AppError } from "@/server/errors";
-import { createModelMediaToken } from "@/server/media/signing";
-import { resolveMediaPath } from "@/server/media/storage";
+import {
+  readVideoFrames,
+  resolveMediaPath,
+} from "@/server/media/storage";
 import {
   analysisResultSchema,
   type AnalysisResult,
@@ -19,9 +21,6 @@ export interface AnalyzeInput {
 export interface MultimodalAnalyzer {
   analyze(input: AnalyzeInput): Promise<AnalysisResult>;
 }
-
-const MAX_BASE64_VIDEO_BYTES = 7 * 1024 * 1024;
-const DEVELOPMENT_SIGNING_SECRET = "development-only-signing-secret";
 
 const imageShape = `{
   "kind":"image",
@@ -43,7 +42,7 @@ const videoShape = `{
 function promptFor(mediaType: MediaType, correction?: string) {
   const scope =
     mediaType === "video"
-      ? "只分析画面，不分析音轨，不输出 ASR 或语言。时间必须使用秒。"
+      ? "输入是按时间分位采样的关键帧。只分析画面，不分析音轨，不输出 ASR 或语言。根据每帧标注时间生成时间轴，时间必须使用秒。"
       : "识别画面与可见文字；无法识别 OCR 时提供 unavailableReason。";
   return [
     "你是素材库分析器。请使用简体中文描述和标签。",
@@ -93,56 +92,49 @@ async function mediaContent(input: AnalyzeInput, config: AppConfig) {
       resolveMediaPath(input.relativePath, config.mediaRoot),
     );
     return {
-      chat: {
-        type: "image_url",
-        image_url: { url: `data:${input.mimeType};base64,${bytes.toString("base64")}` },
-      },
-      responses: {
-        type: "input_image",
-        image_url: `data:${input.mimeType};base64,${bytes.toString("base64")}`,
-      },
+      chat: [
+        {
+          type: "image_url",
+          image_url: {
+            url: `data:${input.mimeType};base64,${bytes.toString("base64")}`,
+          },
+        },
+      ],
+      responses: [
+        {
+          type: "input_image",
+          image_url: `data:${input.mimeType};base64,${bytes.toString("base64")}`,
+        },
+      ],
     };
   }
   if (
     config.MODEL_PROTOCOL !== "openai_chat_completions" ||
-    config.MODEL_VIDEO_MODE === "disabled"
+    config.MODEL_VIDEO_MODE !== "frames"
   ) {
     throw new AppError("model_video_unsupported");
   }
-  const filePath = resolveMediaPath(input.relativePath, config.mediaRoot);
-  const stat = await fs.stat(filePath);
-  let url: string;
-  if (
-    config.MODEL_VIDEO_MODE === "auto" &&
-    stat.size < MAX_BASE64_VIDEO_BYTES
-  ) {
-    const bytes = await fs.readFile(filePath);
-    url = `data:${input.mimeType};base64,${bytes.toString("base64")}`;
-  } else {
-    const publicUrl = config.APP_PUBLIC_URL
-      ? new URL(config.APP_PUBLIC_URL)
-      : null;
-    if (
-      !publicUrl ||
-      publicUrl.protocol !== "https:" ||
-      config.MEDIA_SIGNING_SECRET === DEVELOPMENT_SIGNING_SECRET
-    ) {
-      throw new AppError("model_video_public_url_required");
-    }
-    const token = createModelMediaToken(
-      input.assetId,
-      Date.now() + 10 * 60_000,
-      config.MEDIA_SIGNING_SECRET,
+  const frames = readVideoFrames(input.relativePath, config.mediaRoot);
+  const chat: Array<
+    | { type: "text"; text: string }
+    | { type: "image_url"; image_url: { url: string } }
+  > = [];
+  for (const [index, frame] of frames.entries()) {
+    const bytes = await fs.readFile(frame.absolutePath);
+    chat.push(
+      {
+        type: "text",
+        text: `关键帧 ${index + 1}，时间点 ${frame.timestampSeconds} 秒：`,
+      },
+      {
+        type: "image_url",
+        image_url: {
+          url: `data:image/jpeg;base64,${bytes.toString("base64")}`,
+        },
+      },
     );
-    url = `${publicUrl.toString().replace(/\/$/, "")}/api/model-media/${token}`;
   }
-  return {
-    chat: {
-      type: "video_url",
-      video_url: { url, fps: config.MODEL_VIDEO_FPS },
-    },
-    responses: null,
-  };
+  return { chat, responses: null };
 }
 
 export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
@@ -173,7 +165,7 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
               messages: [
                 {
                   role: "user",
-                  content: [{ type: "text", text: prompt }, media.chat],
+                  content: [{ type: "text", text: prompt }, ...media.chat],
                 },
               ],
             }
@@ -182,7 +174,10 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
               input: [
                 {
                   role: "user",
-                  content: [{ type: "input_text", text: prompt }, media.responses],
+                  content: [
+                    { type: "input_text", text: prompt },
+                    ...(media.responses ?? []),
+                  ],
                 },
               ],
             };
