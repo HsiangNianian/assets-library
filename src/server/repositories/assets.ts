@@ -155,19 +155,33 @@ function summaryFromRow(
   };
 }
 
-export function listAssets(
-  cursor?: string,
-  limit = 24,
-  tagQuery?: string,
-): AssetPage {
+export type AssetOverviewView = "pending" | "published";
+
+export interface ListAssetsOptions {
+  page?: number;
+  limit?: number;
+  view?: AssetOverviewView;
+  tagQuery?: string;
+}
+
+export function listAssets({
+  page = 1,
+  limit = 8,
+  view = "published",
+  tagQuery,
+}: ListAssetsOptions = {}): AssetPage {
   const safeLimit = Math.min(Math.max(limit, 1), 50);
-  const cursorDate = cursor ? new Date(Buffer.from(cursor, "base64url").toString()) : null;
-  const normalizedTagQuery = tagQuery?.trim().toLocaleLowerCase().slice(0, 128);
-  if (cursorDate && Number.isNaN(cursorDate.getTime())) {
-    throw new AppError("invalid_request", "分页游标无效。");
-  }
-  const conditions = [ne(assets.reviewStatus, "deleted")];
-  if (cursorDate) conditions.push(lt(assets.createdAt, cursorDate));
+  const requestedPage = Number.isInteger(page) && page > 0 ? page : 1;
+  const normalizedTagQuery =
+    view === "published"
+      ? tagQuery?.trim().toLocaleLowerCase().slice(0, 128)
+      : undefined;
+  const conditions = [
+    eq(
+      assets.reviewStatus,
+      view === "published" ? "published" : "pending_review",
+    ),
+  ];
   if (normalizedTagQuery) {
     const matchingAssetIds = db
       .select({ assetId: assetTags.assetId })
@@ -176,21 +190,29 @@ export function listAssets(
       .where(sql`instr(${tags.normalizedValue}, ${normalizedTagQuery}) > 0`);
     conditions.push(inArray(assets.id, matchingAssetIds));
   }
+  const total =
+    db
+      .select({ value: sql<number>`count(*)` })
+      .from(assets)
+      .where(and(...conditions))
+      .get()?.value ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / safeLimit));
+  const safePage = Math.min(requestedPage, totalPages);
   const rows = db
     .select()
     .from(assets)
     .where(and(...conditions))
     .orderBy(desc(assets.createdAt))
-    .limit(safeLimit + 1)
+    .limit(safeLimit)
+    .offset((safePage - 1) * safeLimit)
     .all();
-  const pageRows = rows.slice(0, safeLimit);
-  const tagMap = getTagsForAssets(pageRows.map((row) => row.id));
+  const tagMap = getTagsForAssets(rows.map((row) => row.id));
   return {
-    items: pageRows.map((row) => summaryFromRow(row, tagMap.get(row.id) ?? [])),
-    nextCursor:
-      rows.length > safeLimit && pageRows.length
-        ? Buffer.from(pageRows.at(-1)!.createdAt.toISOString()).toString("base64url")
-        : null,
+    items: rows.map((row) => summaryFromRow(row, tagMap.get(row.id) ?? [])),
+    page: safePage,
+    pageSize: safeLimit,
+    total,
+    totalPages,
   };
 }
 

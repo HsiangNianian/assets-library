@@ -7,15 +7,18 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
-    const cursor = url.searchParams.get("cursor") ?? undefined;
+    const view =
+      url.searchParams.get("view") === "pending" ? "pending" : "published";
+    const page = Number.parseInt(url.searchParams.get("page") ?? "1", 10);
     const tagQuery = url.searchParams.get("tag") ?? undefined;
-    const limit = Number.parseInt(url.searchParams.get("limit") ?? "24", 10);
+    const limit = Number.parseInt(url.searchParams.get("limit") ?? "8", 10);
     return Response.json(
-      listAssets(
-        cursor,
-        Number.isNaN(limit) ? 24 : limit,
+      listAssets({
+        view,
+        page: Number.isNaN(page) ? 1 : page,
+        limit: Number.isNaN(limit) ? 8 : limit,
         tagQuery,
-      ),
+      }),
     );
   } catch (error) {
     return errorResponse(error);

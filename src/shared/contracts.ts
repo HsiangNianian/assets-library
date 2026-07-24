@@ -140,5 +140,8 @@ export interface AssetDetail extends AssetSummary {
 
 export interface AssetPage {
   items: AssetSummary[];
-  nextCursor: string | null;
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
 }

@@ -67,7 +67,7 @@ export function AssetOverviewGrid({ assets }: { assets: AssetSummary[] }) {
           {message}
         </p>
       )}
-      <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
         {assets.map((asset) => {
           const canPublish =
             asset.processingStatus === "completed" &&
