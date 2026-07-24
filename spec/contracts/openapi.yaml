@@ -94,6 +94,7 @@ paths:
       summary: Stream original media with Range support
       parameters:
         - { name: assetId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: download, in: query, description: Set to 1 to return the original file as an attachment, schema: { type: string, enum: ["1"] } }
       responses:
         "200": { description: Full media }
         "206": { description: Partial media }

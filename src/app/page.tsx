@@ -54,7 +54,7 @@ export default async function OverviewPage({
 }) {
   const parameters = await searchParams;
   const view: AssetOverviewView =
-    firstParameter(parameters.view) === "published" ? "published" : "pending";
+    firstParameter(parameters.view) === "pending" ? "pending" : "published";
   const requestedPage = Number.parseInt(firstParameter(parameters.page) ?? "1", 10);
   const tagQuery =
     view === "published"
@@ -91,15 +91,15 @@ export default async function OverviewPage({
         <nav className="flex w-fit rounded-xl border border-slate-200 bg-white p-1">
           <Button
             asChild
-            variant={view === "pending" ? "default" : "ghost"}
-          >
-            <Link href={overviewHref("pending", 1)}>待入库</Link>
-          </Button>
-          <Button
-            asChild
             variant={view === "published" ? "default" : "ghost"}
           >
             <Link href={overviewHref("published", 1)}>已入库</Link>
+          </Button>
+          <Button
+            asChild
+            variant={view === "pending" ? "default" : "ghost"}
+          >
+            <Link href={overviewHref("pending", 1)}>待入库</Link>
           </Button>
         </nav>
 

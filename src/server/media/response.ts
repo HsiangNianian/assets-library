@@ -15,11 +15,12 @@ export function mediaResponse(assetId: string, request: Request) {
   }
   const size = fs.statSync(filePath).size;
   const range = request.headers.get("range");
+  const download = new URL(request.url).searchParams.get("download") === "1";
   const headers = {
     "Content-Type": asset.mimeType,
     "Accept-Ranges": "bytes",
     "Cache-Control": "private, max-age=3600",
-    "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(asset.originalFilename)}`,
+    "Content-Disposition": `${download ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(asset.originalFilename)}`,
   };
   if (!range) {
     return new Response(Readable.toWeb(fs.createReadStream(filePath)) as ReadableStream, {

@@ -6,6 +6,7 @@ import {
   AlertCircle,
   CheckCircle2,
   Clock3,
+  Download,
   RefreshCcw,
   Save,
   Send,
@@ -173,6 +174,14 @@ export function AssetEditor({ initialAsset }: { initialAsset: AssetDetail }) {
               <RefreshCcw className="size-4" /> 重试
             </Button>
           )}
+          <Button asChild variant="outline">
+            <a
+              href={`/api/media/${asset.id}?download=1`}
+              download={asset.originalFilename}
+            >
+              <Download className="size-4" /> 下载素材
+            </a>
+          </Button>
           <Button variant="destructive" disabled={busy} onClick={remove}>
             <Trash2 className="size-4" /> 删除
           </Button>
