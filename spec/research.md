@@ -2,7 +2,7 @@
 
 ## SQLite 任务队列
 
-单机 MVP 使用 SQLite WAL。worker 在 `BEGIN IMMEDIATE` 事务内选择并抢占最早可用任务；启动时恢复超过十分钟仍处于 `running` 的任务。这样不需要 Redis，同时避免 Web 请求承担长时间模型调用。
+单机 MVP 使用 SQLite WAL。worker 在 `BEGIN IMMEDIATE` 事务内选择并抢占最早可用任务，运行期间每 30 秒更新任务心跳并周期扫描；超过两分钟没有心跳的 `running` 任务重新排队。这样既不需要 Redis，也避免 worker 异常退出后素材永久停留在“分析中”。
 
 ## 流式 multipart
 

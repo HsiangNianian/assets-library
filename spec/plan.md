@@ -43,9 +43,12 @@ src/
 
 视频模型输入只在 Chat Completions 且 `MODEL_VIDEO_MODE=frames` 时开启。worker 读取已持久化的 JPEG 关键帧，按时间点标注后作为多图片输入发送。Responses 或禁用模式以 `model_video_unsupported` 终止；关键帧缺失或无效则以 `video_frames_missing` 终止并允许重试。
 
+Qwen3.7 默认启用思考模式，但素材描述和标签提取属于直接结构化任务，因此通过 `MODEL_ENABLE_THINKING=false` 关闭，以减少推理等待和输出成本。非 Qwen 兼容端点未显式配置时不附加该扩展参数。
+
 ## 运行边界
 
 - Web 与 worker 是同一仓库的两个长期 Node 进程，共享数据库和媒体目录。
+- worker 每 30 秒更新运行任务心跳并扫描失联任务；超过两分钟没有心跳的任务重新排队。
 - 不依赖 Redis、消息队列、对象存储或 FFmpeg。
 - 浏览器执行关键帧采样；服务端不依赖 FFmpeg，也不从原视频解码或转码。
 - 关键帧保存在素材 UUID 目录中，分析重试复用原帧，清理任务删除整个素材目录。
