@@ -14,14 +14,14 @@ test("overview and upload pages expose the MVP scope", async ({ page }) => {
   ).toBeVisible();
   await expect(
     page.getByRole("textbox", { name: "按标签搜索已入库素材" }),
-  ).toHaveCount(0);
-  await page.getByRole("link", { name: "已入库", exact: true }).click();
-  await expect(
-    page.getByRole("textbox", { name: "按标签搜索已入库素材" }),
   ).toBeVisible();
   await expect(
     page.getByText("仅搜索已入库素材的标签，不匹配素材名称或描述。"),
   ).toBeVisible();
+  await page.getByRole("link", { name: "待入库", exact: true }).click();
+  await expect(
+    page.getByRole("textbox", { name: "按标签搜索已入库素材" }),
+  ).toHaveCount(0);
   await page.getByRole("link", { name: /上传素材/ }).click();
   await expect(page.getByRole("heading", { name: "上传素材" })).toBeVisible();
   await expect(page.getByText(/自动提取 1–5 张关键帧/)).toBeVisible();

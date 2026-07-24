@@ -145,6 +145,16 @@ describe("complete asset processing flow", () => {
     expect(partial.status).toBe(206);
     expect(partial.headers.get("content-range")).toMatch(/^bytes 0-9\//);
 
+    const download = media.mediaResponse(
+      assetId,
+      new Request("http://localhost/media?download=1"),
+    );
+    expect(download.status).toBe(200);
+    expect(download.headers.get("content-disposition")).toBe(
+      "attachment; filename*=UTF-8''campaign.png",
+    );
+    await download.arrayBuffer();
+
     repository.softDeleteAsset(assetId);
     const cleanup = repository.claimNextJob();
     expect(cleanup?.type).toBe("cleanup");
