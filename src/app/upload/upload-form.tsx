@@ -108,7 +108,21 @@ export function UploadForm() {
           cache: "no-store",
           signal: controller.signal,
         });
-        if (!response.ok || !mountedRef.current) return;
+        if (!mountedRef.current) return;
+        if (!response.ok) {
+          let message = `无法获取处理状态（HTTP ${response.status}），请前往素材概览查看。`;
+          try {
+            const payload = (await response.json()) as ApiError;
+            message = payload.error?.message ?? message;
+          } catch {
+            // Keep the actionable fallback when the response is not JSON.
+          }
+          updateItem(itemId, {
+            phase: "failed",
+            error: message,
+          });
+          return;
+        }
         const status = (await response.json()) as UploadStatus;
         if (!mountedRef.current) return;
         if (status.processingStatus === "completed") {

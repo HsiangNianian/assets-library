@@ -84,6 +84,14 @@ test("submits every selected asset as an independent upload", async ({
       });
       return;
     }
+    if (request.method() === "GET" && pathname.startsWith("/api/uploads/")) {
+      await route.fulfill({
+        status: 503,
+        contentType: "text/plain",
+        body: "temporarily unavailable",
+      });
+      return;
+    }
     await route.continue();
   });
 
@@ -97,5 +105,14 @@ test("submits every selected asset as an independent upload", async ({
   await expect.poll(() => uploadCount).toBe(2);
   await expect(
     page.getByText("所选素材均已提交，可在素材概览继续查看状态。"),
+  ).toBeVisible();
+  const firstItem = page
+    .getByRole("listitem")
+    .filter({ hasText: "one.png" });
+  await firstItem.hover();
+  await expect(
+    firstItem.getByText(
+      "无法获取处理状态（HTTP 503），请前往素材概览查看。",
+    ),
   ).toBeVisible();
 });
