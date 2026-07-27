@@ -31,7 +31,9 @@ pnpm dev
 - `openai_chat_completions`
 - `openai_responses`
 
-并配置 `MODEL_BASE_URL`、`MODEL_API_KEY`、`MODEL_NAME`。兼容百炼等第三方服务时使用其 OpenAI 兼容 Base URL。
+并配置 `MODEL_BASE_URL` 和 `MODEL_NAME`。兼容 NewAPI、百炼等第三方服务时使用其 OpenAI
+兼容 Base URL（通常以 `/v1` 结尾）。`MODEL_API_KEY` 是可选的：网关启用鉴权时填写
+NewAPI 令牌，网关关闭鉴权时可以留空；留空后请求不会发送 `Authorization` 请求头。
 
 `qwen3.7` 系列默认开启思考模式。素材结构化提取不需要长推理，建议关闭以降低等待时间：
 
