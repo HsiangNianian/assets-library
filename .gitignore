@@ -141,3 +141,9 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Asset Library runtime data
+/data/
+/media/
+/playwright-report/
+/test-results/
