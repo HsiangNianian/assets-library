@@ -187,14 +187,18 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
                 },
               ],
             };
+        const headers: Record<string, string> = {
+          "content-type": "application/json",
+        };
+        const apiKey = this.config.MODEL_API_KEY?.trim();
+        if (apiKey) {
+          headers.authorization = `Bearer ${apiKey}`;
+        }
         const response = await fetch(
           `${this.config.MODEL_BASE_URL!.replace(/\/$/, "")}/${endpoint}`,
           {
             method: "POST",
-            headers: {
-              authorization: `Bearer ${this.config.MODEL_API_KEY}`,
-              "content-type": "application/json",
-            },
+            headers,
             body: JSON.stringify(body),
             signal: controller.signal,
           },

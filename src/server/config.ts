@@ -25,13 +25,13 @@ export function loadConfig(
   env: Record<string, string | undefined> = process.env,
 ) {
   const parsed = envSchema.parse(env);
+  const hasModelEndpoint = Boolean(parsed.MODEL_BASE_URL?.trim());
+  const hasModelName = Boolean(parsed.MODEL_NAME?.trim());
   return {
     ...parsed,
     databasePath: path.resolve(parsed.DATABASE_PATH),
     mediaRoot: path.resolve(parsed.MEDIA_ROOT),
-    modelConfigured: Boolean(
-      parsed.MODEL_BASE_URL && parsed.MODEL_API_KEY && parsed.MODEL_NAME,
-    ),
+    modelConfigured: hasModelEndpoint && hasModelName,
     modelEnableThinking:
       parsed.MODEL_ENABLE_THINKING !== undefined
         ? parsed.MODEL_ENABLE_THINKING === "true"

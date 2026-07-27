@@ -74,6 +74,57 @@ describe("model adapter", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  it("supports an OpenAI-compatible endpoint without API-key authentication", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "asset-newapi-"));
+    await fs.mkdir(path.join(root, "a"));
+    await fs.writeFile(path.join(root, "a", "original.jpeg"), "image");
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      MODEL_PROTOCOL: "openai_chat_completions",
+      MODEL_BASE_URL: "http://183.147.142.111:30000/v1",
+      MODEL_API_KEY: "",
+      MODEL_NAME: "qwen3.6-plus",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  kind: "image",
+                  description: "NewAPI 图片",
+                  tags: {
+                    scene: [],
+                    object: [],
+                    person: [],
+                    style: [],
+                    color_composition: [],
+                  },
+                  ocr: { text: null, unavailableReason: "无文字" },
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    expect(config.modelConfigured).toBe(true);
+    await new OpenAICompatibleAnalyzer(config).analyze({
+      assetId: "a",
+      mediaType: "image",
+      mimeType: "image/jpeg",
+      relativePath: "a/original.jpeg",
+    });
+
+    const [url, request] = fetchMock.mock.calls[0] ?? [];
+    expect(url).toBe("http://183.147.142.111:30000/v1/chat/completions");
+    expect(new Headers(request?.headers).has("authorization")).toBe(false);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
   it("fails video under the Responses protocol without fallback", async () => {
     const config = loadConfig({
       MODEL_PROTOCOL: "openai_responses",
