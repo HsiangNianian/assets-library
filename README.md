@@ -68,6 +68,98 @@ pnpm start:worker
 
 该模式要求持久磁盘和长期 Node 进程，不支持 Serverless。建议由反向代理提供 HTTPS、请求体限制和内网访问控制。
 
+## Docker 部署
+
+镜像只包含程序和默认配置，**不包含本机的 `.env`、SQLite 数据库或上传的媒体文件**。这样可以安全地发布到镜像仓库；运行容器时再注入模型配置，并挂载持久存储。
+
+### 前置条件
+
+- Docker Engine 已安装并处于运行状态。
+- 已准备模型服务配置。以示例文件为起点创建本机配置：
+
+  ```bash
+  cp .env.example .env
+  ```
+
+  至少确认 `.env` 中的 `MODEL_PROTOCOL`、`MODEL_BASE_URL`、`MODEL_API_KEY`（如需要）和 `MODEL_NAME` 适用于你的模型服务。不要将 `.env` 提交到 Git 或打包进镜像。
+
+### 构建镜像
+
+在仓库根目录执行：
+
+```bash
+docker build -t ghcr.io/onestudentforcode/assets-library:latest .
+```
+
+如已从 GHCR 获取镜像，可跳过此步骤：
+
+```bash
+docker pull ghcr.io/onestudentforcode/assets-library:latest
+```
+
+### 首次启动
+
+Web 服务和后台 worker 是两个独立进程，必须共享同一份 SQLite 数据库和媒体目录。下面使用 Docker named volumes 保存它们；删除容器不会删除其中的数据。
+
+```bash
+docker volume create assets-library-data
+docker volume create assets-library-media
+```
+
+首次启动或镜像升级后，先运行数据库迁移：
+
+```bash
+docker run --rm \
+  --env-file .env \
+  -v assets-library-data:/app/data \
+  -v assets-library-media:/app/media \
+  ghcr.io/onestudentforcode/assets-library:latest \
+  pnpm db:migrate
+```
+
+启动 Web 服务。应用会在宿主机的 <http://localhost:3000> 提供服务：
+
+```bash
+docker run -d \
+  --name assets-library-web \
+  --restart unless-stopped \
+  --env-file .env \
+  -p 3000:3000 \
+  -v assets-library-data:/app/data \
+  -v assets-library-media:/app/media \
+  ghcr.io/onestudentforcode/assets-library:latest
+```
+
+启动后台 worker。它负责领取并处理上传后的分析任务：
+
+```bash
+docker run -d \
+  --name assets-library-worker \
+  --restart unless-stopped \
+  --env-file .env \
+  -v assets-library-data:/app/data \
+  -v assets-library-media:/app/media \
+  ghcr.io/onestudentforcode/assets-library:latest \
+  pnpm start:worker
+```
+
+查看运行状态与日志：
+
+```bash
+docker ps --filter name=assets-library
+docker logs -f assets-library-web
+docker logs -f assets-library-worker
+```
+
+停止服务但保留数据：
+
+```bash
+docker stop assets-library-web assets-library-worker
+docker rm assets-library-web assets-library-worker
+```
+
+升级镜像时，先拉取或重新构建新标签，删除旧容器，再按照“首次启动”中的迁移、Web 和 worker 命令重新创建容器。请勿删除 `assets-library-data` 或 `assets-library-media` volume，除非你确认要永久清空素材库。
+
 ## 验证
 
 ```bash
