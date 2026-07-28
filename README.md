@@ -97,6 +97,35 @@ docker build -t ghcr.io/onestudentforcode/assets-library:latest .
 docker pull ghcr.io/onestudentforcode/assets-library:latest
 ```
 
+### 一键启动（推荐）
+
+确认已创建并配置 `.env` 后，在仓库根目录执行：
+
+```bash
+docker compose up -d
+```
+
+Compose 会自动构建本地镜像、创建两个持久化 volume、运行一次数据库迁移，然后启动 Web 和 worker。Web 服务地址为 <http://localhost:3000>。
+
+查看服务状态与日志：
+
+```bash
+docker compose ps
+docker compose logs -f web worker
+```
+
+代码或 Dockerfile 更新后，使用下面的命令重新构建并启动：
+
+```bash
+docker compose up -d --build
+```
+
+停止服务但保留数据库和媒体文件：
+
+```bash
+docker compose down
+```
+
 ### 首次启动
 
 Web 服务和后台 worker 是两个独立进程，必须共享同一份 SQLite 数据库和媒体目录。下面使用 Docker named volumes 保存它们；删除容器不会删除其中的数据。
@@ -118,6 +147,7 @@ docker run --rm \
 ```
 
 启动 Web 服务。应用会在宿主机的 <http://localhost:3000> 提供服务：
+
 
 ```bash
 docker run -d \

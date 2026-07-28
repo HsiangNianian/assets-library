@@ -1,0 +1,36 @@
+x-app: &app
+  build:
+    context: .
+  image: ghcr.io/onestudentforcode/assets-library:latest
+  env_file:
+    - .env
+  volumes:
+    - assets-library-data:/app/data
+    - assets-library-media:/app/media
+
+services:
+  migrate:
+    <<: *app
+    command: pnpm db:migrate
+    restart: "no"
+
+  web:
+    <<: *app
+    ports:
+      - "3000:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker:
+    <<: *app
+    command: pnpm start:worker
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  assets-library-data:
+  assets-library-media:
