@@ -1,34 +1,25 @@
 x-app: &app
-  build:
-    context: .
-  image: ghcr.io/onestudentforcode/assets-library:latest
+  image: ghcr.io/onestudentforcode/assets-library:pr5-v2
   env_file:
     - .env
+  # This host runs Docker without veth support. The services share only
+  # persistent files, so they do not require an isolated bridge network.
+  network_mode: host
   volumes:
     - assets-library-data:/app/data
     - assets-library-media:/app/media
 
 services:
-  migrate:
-    <<: *app
-    command: pnpm db:migrate
-    restart: "no"
-
   web:
     <<: *app
-    ports:
-      - "3000:3000"
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
+    build:
+      context: .
+      network: host
     restart: unless-stopped
 
   worker:
     <<: *app
     command: pnpm start:worker
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:

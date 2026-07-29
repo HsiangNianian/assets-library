@@ -97,6 +97,39 @@ docker build -t ghcr.io/onestudentforcode/assets-library:latest .
 docker pull ghcr.io/onestudentforcode/assets-library:latest
 ```
 
+GHCR 中由 GitHub Actions 发布的镜像同时支持 `linux/amd64` 与 `linux/arm64`；Docker 会在 x86-64 或 ARM 主机上自动拉取对应架构。若需要在本机手动发布多架构镜像，先安装并启用 Docker Buildx，再执行：
+
+```bash
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t ghcr.io/onestudentforcode/assets-library:latest \
+  --push .
+```
+
+Dockerfile 的 Debian 构建依赖和 npm 依赖默认使用阿里云镜像：`mirrors.aliyun.com` 与 `registry.npmmirror.com`。如需使用官方源，可通过构建参数覆盖：
+
+```bash
+docker build \
+  --build-arg NPM_REGISTRY=https://registry.npmjs.org \
+  --build-arg DEBIAN_MIRROR=http://deb.debian.org/debian \
+  --build-arg DEBIAN_SECURITY_MIRROR=http://deb.debian.org/debian-security \
+  -t ghcr.io/onestudentforcode/assets-library:latest .
+```
+
+Docker Hub 基础镜像（例如 `node:22-bookworm-slim`）的拉取加速由 Docker 守护进程控制，无法写入 Dockerfile。请从阿里云容器镜像服务控制台获取个人加速地址，并写入宿主机 `/etc/docker/daemon.json`：
+
+```json
+{
+  "registry-mirrors": ["https://<你的阿里云专属地址>.mirror.aliyuncs.com"]
+}
+```
+
+在 Arch Linux 上重启 Docker 使配置生效：
+
+```bash
+sudo systemctl restart docker
+```
+
 ### 一键启动（推荐）
 
 确认已创建并配置 `.env` 后，在仓库根目录执行：
@@ -105,7 +138,7 @@ docker pull ghcr.io/onestudentforcode/assets-library:latest
 docker compose up -d
 ```
 
-Compose 会自动构建本地镜像、创建两个持久化 volume、运行一次数据库迁移，然后启动 Web 和 worker。Web 服务地址为 <http://localhost:3000>。
+Compose 会自动构建本地镜像、创建两个持久化 volume，然后启动 Web 和 worker。镜像入口脚本会在每个服务启动前检查并升级数据库结构；共享锁会确保 SQLite 迁移不会并发执行。当前 Compose 配置让构建与运行均使用 Linux host 网络模式，以兼容不支持 Docker bridge veth 的宿主环境，因此 Web 直接监听宿主机的 <http://localhost:3000>。
 
 查看服务状态与日志：
 
@@ -135,18 +168,7 @@ docker volume create assets-library-data
 docker volume create assets-library-media
 ```
 
-首次启动或镜像升级后，先运行数据库迁移：
-
-```bash
-docker run --rm \
-  --env-file .env \
-  -v assets-library-data:/app/data \
-  -v assets-library-media:/app/media \
-  ghcr.io/onestudentforcode/assets-library:latest \
-  pnpm db:migrate
-```
-
-启动 Web 服务。应用会在宿主机的 <http://localhost:3000> 提供服务：
+启动 Web 服务。镜像会先自动检查并升级数据库，然后在宿主机的 <http://localhost:3000> 提供服务：
 
 
 ```bash
@@ -154,7 +176,7 @@ docker run -d \
   --name assets-library-web \
   --restart unless-stopped \
   --env-file .env \
-  -p 3000:3000 \
+  --network host \
   -v assets-library-data:/app/data \
   -v assets-library-media:/app/media \
   ghcr.io/onestudentforcode/assets-library:latest
@@ -167,6 +189,7 @@ docker run -d \
   --name assets-library-worker \
   --restart unless-stopped \
   --env-file .env \
+  --network host \
   -v assets-library-data:/app/data \
   -v assets-library-media:/app/media \
   ghcr.io/onestudentforcode/assets-library:latest \
