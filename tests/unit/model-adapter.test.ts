@@ -15,6 +15,7 @@ const videoAnalysis = {
   timeline: [{ startSeconds: 0, endSeconds: 3, summary: "完整片段" }],
   transcript: "不应进入正式结果",
 };
+const modelBaseUrl = process.env.MODEL_BASE_URL ?? "https://proxy.example/v1";
 
 describe("model adapter", () => {
   afterEach(() => {
@@ -25,7 +26,7 @@ describe("model adapter", () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "asset-model-"));
     process.env.MEDIA_ROOT = root;
     process.env.MODEL_PROTOCOL = "openai_chat_completions";
-    process.env.MODEL_BASE_URL = "https://proxy.example/v1";
+    process.env.MODEL_BASE_URL = modelBaseUrl;
     process.env.MODEL_API_KEY = "secret";
     process.env.MODEL_NAME = "qwen3.7-plus";
     await fs.mkdir(path.join(root, "a"));
@@ -63,7 +64,7 @@ describe("model adapter", () => {
     });
     expect(result.description).toBe("测试图片");
     expect(fetch).toHaveBeenCalledWith(
-      "https://proxy.example/v1/chat/completions",
+      `${modelBaseUrl}/chat/completions`,
       expect.objectContaining({ method: "POST" }),
     );
     const request = vi.mocked(fetch).mock.calls[0]?.[1];
@@ -77,7 +78,7 @@ describe("model adapter", () => {
   it("fails video under the Responses protocol without fallback", async () => {
     const config = loadConfig({
       MODEL_PROTOCOL: "openai_responses",
-      MODEL_BASE_URL: "https://proxy.example/v1",
+      MODEL_BASE_URL: modelBaseUrl,
       MODEL_API_KEY: "secret",
       MODEL_NAME: "vision-model",
     });
@@ -112,7 +113,7 @@ describe("model adapter", () => {
     const config = loadConfig({
       MEDIA_ROOT: root,
       MODEL_PROTOCOL: "openai_chat_completions",
-      MODEL_BASE_URL: "https://proxy.example/v1",
+      MODEL_BASE_URL: modelBaseUrl,
       MODEL_API_KEY: "secret",
       MODEL_NAME: "qwen3.7-plus",
       MODEL_VIDEO_MODE: "frames",
