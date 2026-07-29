@@ -40,6 +40,29 @@ interface UploadItem {
   error: string;
 }
 
+function createUploadId(): string {
+  const browserCrypto = globalThis.crypto;
+  if (typeof browserCrypto?.randomUUID === "function") {
+    return browserCrypto.randomUUID();
+  }
+
+  const bytes = new Uint8Array(16);
+  if (browserCrypto?.getRandomValues) {
+    browserCrypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  return Array.from(bytes, (byte, index) => {
+    const separator = [4, 6, 8, 10].includes(index) ? "-" : "";
+    return `${separator}${byte.toString(16).padStart(2, "0")}`;
+  }).join("");
+}
+
 const phaseLabels: Record<UploadPhase, string> = {
   queued: "等待上传",
   extracting: "提取关键帧",
@@ -262,7 +285,7 @@ export function UploadForm() {
       const previewUrl = URL.createObjectURL(file);
       previewUrlsRef.current.add(previewUrl);
       return {
-        id: crypto.randomUUID(),
+        id: createUploadId(),
         file,
         previewUrl,
         phase: "queued",
