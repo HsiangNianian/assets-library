@@ -88,7 +88,7 @@ pnpm start:worker
 在仓库根目录执行：
 
 ```bash
-docker build -t ghcr.io/onestudentforcode/assets-library:latest .
+docker build --network host -t ghcr.io/onestudentforcode/assets-library:latest .
 ```
 
 如已从 GHCR 获取镜像，可跳过此步骤：
@@ -106,10 +106,11 @@ docker buildx build \
   --push .
 ```
 
-Dockerfile 的 Debian 构建依赖和 npm 依赖默认使用阿里云镜像：`mirrors.aliyun.com` 与 `registry.npmmirror.com`。如需使用官方源，可通过构建参数覆盖：
+Dockerfile 的 Debian 构建依赖和 npm 依赖默认使用阿里云镜像：`mirrors.aliyun.com` 与 `registry.npmmirror.com`。Debian slim 初始镜像没有系统 CA 证书，因此首次 apt 安装使用 HTTP 阿里源并立即安装 `ca-certificates`；软件包索引和软件包仍由 Debian 签名验证。如需使用官方源，可通过构建参数覆盖：
 
 ```bash
 docker build \
+  --network host \
   --build-arg NPM_REGISTRY=https://registry.npmjs.org \
   --build-arg DEBIAN_MIRROR=http://deb.debian.org/debian \
   --build-arg DEBIAN_SECURITY_MIRROR=http://deb.debian.org/debian-security \

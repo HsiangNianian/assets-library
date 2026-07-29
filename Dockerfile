@@ -17,16 +17,18 @@ WORKDIR /app
 
 FROM base AS dependencies
 
-ARG DEBIAN_MIRROR=https://mirrors.aliyun.com/debian
-ARG DEBIAN_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security
+ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
+ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 
 # Native dependencies such as better-sqlite3 and sharp may need to compile.
+# The slim base image has no system CA bundle yet. Debian repository metadata
+# remains signature-verified while the initial packages install ca-certificates.
 RUN sed -i \
       -e "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
       -e "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
       /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
-    && apt-get install --no-install-recommends -y python3 make g++ \
+    && apt-get install --no-install-recommends -y ca-certificates python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
