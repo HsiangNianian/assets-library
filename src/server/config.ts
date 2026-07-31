@@ -17,6 +17,13 @@ const envSchema = z.object({
   MODEL_RETRY_COUNT: z.coerce.number().int().min(0).max(3).default(1),
   MODEL_VIDEO_MODE: z.enum(["disabled", "frames"]).default("frames"),
   MODEL_ENABLE_THINKING: z.enum(["true", "false"]).optional(),
+  CHROMA_URL: z.string().url().default("http://127.0.0.1:8000"),
+  CHROMA_COLLECTION: z.string().min(3).default("asset_analysis"),
+  CHROMA_TENANT: z.string().default("default_tenant"),
+  CHROMA_DATABASE: z.string().default("default_database"),
+  EMBEDDING_BASE_URL: z.string().url().optional().or(z.literal("")),
+  EMBEDDING_API_KEY: z.string().optional(),
+  EMBEDDING_MODEL: z.string().optional(),
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;
@@ -31,6 +38,11 @@ export function loadConfig(
     mediaRoot: path.resolve(parsed.MEDIA_ROOT),
     modelConfigured: Boolean(
       parsed.MODEL_BASE_URL && parsed.MODEL_API_KEY && parsed.MODEL_NAME,
+    ),
+    embeddingBaseUrl: parsed.EMBEDDING_BASE_URL || parsed.MODEL_BASE_URL,
+    embeddingApiKey: parsed.EMBEDDING_API_KEY ?? parsed.MODEL_API_KEY,
+    embeddingConfigured: Boolean(
+      (parsed.EMBEDDING_BASE_URL || parsed.MODEL_BASE_URL) && parsed.EMBEDDING_MODEL,
     ),
     modelEnableThinking:
       parsed.MODEL_ENABLE_THINKING !== undefined

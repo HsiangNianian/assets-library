@@ -56,6 +56,23 @@ Responses 协议或禁用视频能力时，视频任务会明确失败为 `model
 
 概览默认打开“已入库”，并可切换到“待入库”；每页按 4 列 × 2 行展示 8 个素材。标签搜索只在“已入库”视图提供，不会检索处理中、失败或等待审核的素材。素材详情可通过受控媒体接口按原始文件名下载上传文件。
 
+## 语义搜索（Chroma）
+
+启用 `EMBEDDING_MODEL` 后，worker 会在视觉 LLM 分析完成并保存结果后，额外创建 embedding
+任务：它会将描述、标签、OCR 及视频时间轴按字段切分、分词，调用 OpenAI 兼容的
+`/embeddings` 接口，并把向量持久化到本地 Chroma 的 `asset_analysis` collection。搜索关键词会用
+同一模型生成向量，语义命中与标签模糊匹配合并排序；Chroma 暂不可用时仍保留标签搜索。
+
+`docker compose up -d` 会启动持久化的 Chroma 服务。填写以下配置即可启用（`EMBEDDING_BASE_URL`
+留空时复用 `MODEL_BASE_URL`；embedding 模型必须与查询阶段相同）：
+
+```dotenv
+CHROMA_URL=http://127.0.0.1:8000
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_BASE_URL=
+EMBEDDING_API_KEY=
+```
+
 ## 生产运行
 
 Web 与 worker 必须共享同一 SQLite 文件和媒体目录：

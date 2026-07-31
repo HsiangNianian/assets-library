@@ -11,6 +11,7 @@ import {
   uploadRequests,
 } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
+import { searchAnalysis } from "@/server/search/chroma";
 import {
   analysisResultSchema,
   type AssetDetail,
@@ -29,6 +30,7 @@ const progress = {
   completed: 100,
   failed: 100,
 } as const;
+const strongSemanticSimilarity = 0.55;
 
 export interface CreateAssetInput {
   assetId: string;
@@ -164,12 +166,60 @@ export interface ListAssetsOptions {
   tagQuery?: string;
 }
 
-export function listAssets({
+function tagMatchScore(tag: string, query: string) {
+  if (tag === query) return 1_000;
+  if (tag.startsWith(query)) return 800 - (tag.length - query.length);
+  if (tag.includes(query)) return 600 - (tag.length - query.length);
+  if (query.includes(tag)) return 500 - (query.length - tag.length);
+
+  // A one-character typo is common for short Chinese tags. Avoid fuzzy
+  // matching a single character because it would produce too many false hits.
+  if (query.length < 2) return 0;
+  const maximumDistance = query.length <= 4 ? 1 : Math.min(3, Math.floor(query.length / 3));
+  const distance = levenshteinDistance(tag, query);
+  return distance <= maximumDistance ? 300 - distance * 50 : 0;
+}
+
+function levenshteinDistance(left: string, right: string) {
+  const leftCharacters = Array.from(left);
+  const rightCharacters = Array.from(right);
+  let previous = Array.from({ length: rightCharacters.length + 1 }, (_, index) => index);
+
+  for (let leftIndex = 1; leftIndex <= leftCharacters.length; leftIndex += 1) {
+    const current = [leftIndex];
+    for (let rightIndex = 1; rightIndex <= rightCharacters.length; rightIndex += 1) {
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1]! + 1,
+        previous[rightIndex]! + 1,
+        previous[rightIndex - 1]! +
+          (leftCharacters[leftIndex - 1] === rightCharacters[rightIndex - 1] ? 0 : 1),
+      );
+    }
+    previous = current;
+  }
+  return previous[rightCharacters.length]!;
+}
+
+function matchingAssetScores(tagQuery: string) {
+  const scores = new Map<string, number>();
+  const tagRows = db
+    .select({ assetId: assetTags.assetId, normalizedValue: tags.normalizedValue })
+    .from(assetTags)
+    .innerJoin(tags, eq(assetTags.tagId, tags.id))
+    .all();
+  for (const row of tagRows) {
+    const score = tagMatchScore(row.normalizedValue, tagQuery);
+    if (score > (scores.get(row.assetId) ?? 0)) scores.set(row.assetId, score);
+  }
+  return scores;
+}
+
+export async function listAssets({
   page = 1,
   limit = 8,
   view = "published",
   tagQuery,
-}: ListAssetsOptions = {}): AssetPage {
+}: ListAssetsOptions = {}): Promise<AssetPage> {
   const safeLimit = Math.min(Math.max(limit, 1), 50);
   const requestedPage = Number.isInteger(page) && page > 0 ? page : 1;
   const normalizedTagQuery =
@@ -182,13 +232,25 @@ export function listAssets({
       view === "published" ? "published" : "pending_review",
     ),
   ];
+  const scores = normalizedTagQuery ? matchingAssetScores(normalizedTagQuery) : undefined;
+  const semanticScores = new Map<string, number>();
   if (normalizedTagQuery) {
-    const matchingAssetIds = db
-      .select({ assetId: assetTags.assetId })
-      .from(assetTags)
-      .innerJoin(tags, eq(assetTags.tagId, tags.id))
-      .where(sql`instr(${tags.normalizedValue}, ${normalizedTagQuery}) > 0`);
-    conditions.push(inArray(assets.id, matchingAssetIds));
+    try {
+      const foundSemanticScores = await searchAnalysis(normalizedTagQuery, safeLimit * 5);
+      for (const [assetId, score] of foundSemanticScores) {
+        if (score <= strongSemanticSimilarity && !scores?.has(assetId)) {
+          continue;
+        }
+        semanticScores.set(assetId, score);
+        scores?.set(assetId, Math.max(scores.get(assetId) ?? 0, score * 250));
+      }
+    } catch (error) {
+      console.error("Semantic search unavailable; falling back to tag matching.", error);
+    }
+    if (!scores?.size) {
+      return { items: [], page: 1, pageSize: safeLimit, total: 0, totalPages: 1 };
+    }
+    conditions.push(inArray(assets.id, [...scores.keys()]));
   }
   const total =
     db
@@ -198,17 +260,29 @@ export function listAssets({
       .get()?.value ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / safeLimit));
   const safePage = Math.min(requestedPage, totalPages);
-  const rows = db
+  const matchingRows = db
     .select()
     .from(assets)
     .where(and(...conditions))
     .orderBy(desc(assets.createdAt))
-    .limit(safeLimit)
-    .offset((safePage - 1) * safeLimit)
     .all();
+  const rows = scores
+    ? matchingRows
+        .sort(
+          (left, right) =>
+            (scores.get(right.id) ?? 0) - (scores.get(left.id) ?? 0),
+        )
+        .slice((safePage - 1) * safeLimit, safePage * safeLimit)
+    : matchingRows.slice((safePage - 1) * safeLimit, safePage * safeLimit);
   const tagMap = getTagsForAssets(rows.map((row) => row.id));
   return {
-    items: rows.map((row) => summaryFromRow(row, tagMap.get(row.id) ?? [])),
+    items: rows.map((row) => ({
+      ...summaryFromRow(row, tagMap.get(row.id) ?? []),
+      ...(scores?.has(row.id) ? { searchScore: scores.get(row.id) } : {}),
+      ...(semanticScores.has(row.id)
+        ? { semanticScore: semanticScores.get(row.id) }
+        : {}),
+    })),
     page: safePage,
     pageSize: safeLimit,
     total,
@@ -398,7 +472,7 @@ export function softDeleteAsset(assetId: string) {
 export interface ClaimedJob {
   id: string;
   assetId: string;
-  type: "analyze" | "cleanup";
+  type: "analyze" | "embed" | "cleanup";
   attempt: number;
 }
 
@@ -463,6 +537,49 @@ export function failJob(job: Pick<ClaimedJob, "id" | "attempt">) {
         eq(processingJobs.id, job.id),
         eq(processingJobs.status, "running"),
         eq(processingJobs.attempt, job.attempt),
+      ),
+    )
+    .run().changes;
+}
+
+export function requeueJob(
+  job: Pick<ClaimedJob, "id" | "attempt">,
+  delayMs: number,
+) {
+  const now = new Date();
+  return db
+    .update(processingJobs)
+    .set({
+      status: "queued",
+      availableAt: new Date(now.getTime() + delayMs),
+      claimedAt: null,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(processingJobs.id, job.id),
+        eq(processingJobs.status, "running"),
+        eq(processingJobs.attempt, job.attempt),
+      ),
+    )
+    .run().changes;
+}
+
+export function requeueFailedEmbeddingJobs() {
+  const now = new Date();
+  return db
+    .update(processingJobs)
+    .set({
+      status: "queued",
+      attempt: 0,
+      availableAt: now,
+      claimedAt: null,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(processingJobs.type, "embed"),
+        eq(processingJobs.status, "failed"),
       ),
     )
     .run().changes;

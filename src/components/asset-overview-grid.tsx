@@ -119,6 +119,14 @@ export function AssetOverviewGrid({ assets }: { assets: AssetSummary[] }) {
                       </Badge>
                     ))}
                   </div>
+                  {asset.searchScore !== undefined && (
+                    <div className="flex flex-wrap gap-2 text-xs text-slate-500">
+                      <span>排序分：{asset.searchScore.toFixed(1)}</span>
+                      {asset.semanticScore !== undefined && (
+                        <span>语义分：{asset.semanticScore.toFixed(3)}</span>
+                      )}
+                    </div>
+                  )}
                 </CardContent>
               </Link>
               {canPublish && (

@@ -16,14 +16,20 @@ import {
   OpenAICompatibleAnalyzer,
   type MultimodalAnalyzer,
 } from "@/server/model/analyzer";
+import { indexAnalysis, semanticSearchEnabled } from "@/server/search/chroma";
 import {
   completeJob,
   failJob,
   getAssetRecord,
   heartbeatJob,
+  requeueJob,
   type ClaimedJob,
 } from "@/server/repositories/assets";
-import type { AnalysisResult, FailureCode } from "@/shared/contracts";
+import {
+  analysisResultSchema,
+  type AnalysisResult,
+  type FailureCode,
+} from "@/shared/contracts";
 
 function normalize(value: string) {
   return value.trim().toLocaleLowerCase();
@@ -177,6 +183,20 @@ function persistAnalysis(
       })
       .where(eq(assets.id, job.assetId))
       .run();
+    if (semanticSearchEnabled()) {
+      tx.insert(processingJobs)
+        .values({
+          id: crypto.randomUUID(),
+          assetId: job.assetId,
+          type: "embed",
+          status: "queued",
+          attempt: 0,
+          availableAt: now,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .run();
+    }
     return true;
   });
 }
@@ -240,6 +260,20 @@ export async function processJob(
       completeJob(job);
       return;
     }
+    if (job.type === "embed") {
+      const analysis = db
+        .select()
+        .from(analysisResults)
+        .where(eq(analysisResults.assetId, job.assetId))
+        .get();
+      if (!analysis || asset.reviewStatus === "deleted") {
+        completeJob(job);
+        return;
+      }
+      await indexAnalysis(job.assetId, analysisResultSchema.parse(JSON.parse(analysis.resultJson)));
+      completeJob(job);
+      return;
+    }
     if (asset.reviewStatus === "deleted") {
       completeJob(job);
       return;
@@ -266,7 +300,16 @@ export async function processJob(
       config.MODEL_NAME ?? "unknown",
     );
   } catch (error) {
-    failJobAndMarkAsset(job, error);
+    if (job.type === "embed") {
+      console.error("Embedding analysis failed.", error);
+      if (job.attempt < 3) {
+        requeueJob(job, job.attempt * 30_000);
+      } else {
+        failJob(job);
+      }
+    } else {
+      failJobAndMarkAsset(job, error);
+    }
   } finally {
     clearInterval(heartbeat);
   }

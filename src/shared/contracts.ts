@@ -125,6 +125,8 @@ export interface AssetSummary {
   tags: AssetTag[];
   mediaUrl: string;
   createdAt: string;
+  searchScore?: number;
+  semanticScore?: number;
 }
 
 export interface AssetDetail extends AssetSummary {

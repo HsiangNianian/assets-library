@@ -21,7 +21,7 @@ test("overview and upload pages expose the MVP scope", async ({ page }) => {
     page.getByRole("textbox", { name: "按标签搜索已入库素材" }),
   ).toBeVisible();
   await expect(
-    page.getByText("仅搜索已入库素材的标签，不匹配素材名称或描述。"),
+    page.getByText("仅搜索已入库素材的标签，支持包含匹配和轻微错别字容错。"),
   ).toBeVisible();
   await page.getByRole("link", { name: "待入库", exact: true }).click();
   await expect(

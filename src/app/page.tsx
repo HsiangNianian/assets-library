@@ -60,7 +60,7 @@ export default async function OverviewPage({
     view === "published"
       ? firstParameter(parameters.tag)?.trim().slice(0, 128) ?? ""
       : "";
-  const page = listAssets({
+  const page = await listAssets({
     view,
     page: Number.isNaN(requestedPage) ? 1 : requestedPage,
     limit: 8,
@@ -120,7 +120,7 @@ export default async function OverviewPage({
                     maxLength={128}
                     className="pl-9"
                     aria-label="按标签搜索已入库素材"
-                    placeholder="输入标签搜索，例如：海报、室内、简洁"
+                    placeholder="输入标签搜索，支持错别字容错"
                   />
                 </div>
                 <Button type="submit">
@@ -137,7 +137,7 @@ export default async function OverviewPage({
                 )}
               </form>
               <p className="mt-3 text-xs text-slate-500">
-                仅搜索已入库素材的标签，不匹配素材名称或描述。
+                仅搜索已入库素材的标签，支持包含匹配和轻微错别字容错。
               </p>
             </CardContent>
           </Card>
@@ -153,7 +153,7 @@ export default async function OverviewPage({
             {view === "pending"
               ? "包含等待解析、解析中、解析失败和解析完成待确认的素材。"
               : tagQuery
-                ? `标签包含“${tagQuery}”的已入库素材。`
+                ? `标签模糊匹配“${tagQuery}”的已入库素材。`
                 : "已经完成审核并正式入库的素材。"}
           </p>
         </div>
@@ -177,7 +177,7 @@ export default async function OverviewPage({
             </h2>
             <p className="mt-2 max-w-md text-sm text-slate-500">
               {tagQuery
-                ? `没有已入库素材的标签包含“${tagQuery}”。`
+                ? `没有已入库素材的标签匹配“${tagQuery}”。`
                 : view === "pending"
                   ? "新上传、处理中或等待确认的素材会显示在这里。"
                   : "完成素材分析和审核入库后，即可在这里浏览。"}

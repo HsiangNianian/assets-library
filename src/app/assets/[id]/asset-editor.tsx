@@ -216,7 +216,11 @@ export function AssetEditor({ initialAsset }: { initialAsset: AssetDetail }) {
             </CardHeader>
             <CardContent>
               {asset.analysis ? (
-                <AnalysisView analysis={asset.analysis} />
+                <AnalysisView
+                  analysis={asset.analysis}
+                  description={description}
+                  tags={parsedTags}
+                />
               ) : (
                 <div className="flex items-center gap-3 py-8 text-sm text-slate-500">
                   {asset.processingStatus === "failed" ? (
@@ -284,17 +288,34 @@ export function AssetEditor({ initialAsset }: { initialAsset: AssetDetail }) {
   );
 }
 
-function AnalysisView({ analysis }: { analysis: AssetDetail["analysis"] }) {
+function AnalysisView({
+  analysis,
+  description,
+  tags,
+}: {
+  analysis: AssetDetail["analysis"];
+  description: string;
+  tags: Array<{ category: string; value: string }>;
+}) {
   if (!analysis) return null;
+  const tagsByCategory = tags.reduce<Record<string, typeof tags>>(
+    (groups, tag) => {
+      (groups[tag.category] ??= []).push(tag);
+      return groups;
+    },
+    {},
+  );
   if (analysis.kind === "image") {
     return (
       <div className="space-y-5 text-sm">
-        <p className="leading-7 text-slate-700">{analysis.description}</p>
-        {Object.entries(analysis.tags).map(([category, values]) => (
+        <p className="leading-7 text-slate-700">{description}</p>
+        {Object.entries(tagsByCategory).map(([category, values]) => (
           <div key={category}>
             <p className="mb-2 font-medium text-slate-500">{category}</p>
             <div className="flex flex-wrap gap-2">
-              {values.map((value) => <Badge key={value}>{value}</Badge>)}
+              {values?.map((tag) => (
+                <Badge key={`${tag.category}-${tag.value}`}>{tag.value}</Badge>
+              ))}
             </div>
           </div>
         ))}
@@ -307,9 +328,11 @@ function AnalysisView({ analysis }: { analysis: AssetDetail["analysis"] }) {
   }
   return (
     <div className="space-y-5 text-sm">
-      <p className="leading-7 text-slate-700">{analysis.description}</p>
+      <p className="leading-7 text-slate-700">{description}</p>
       <div className="flex flex-wrap gap-2">
-        {analysis.topics.map((topic) => <Badge key={topic}>{topic}</Badge>)}
+        {tags.map((tag) => (
+          <Badge key={`${tag.category}-${tag.value}`}>{tag.value}</Badge>
+        ))}
       </div>
       <TimedSection
         title="视觉分段"

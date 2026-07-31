@@ -13,7 +13,7 @@ export async function GET(request: Request) {
     const tagQuery = url.searchParams.get("tag") ?? undefined;
     const limit = Number.parseInt(url.searchParams.get("limit") ?? "8", 10);
     return Response.json(
-      listAssets({
+      await listAssets({
         view,
         page: Number.isNaN(page) ? 1 : page,
         limit: Number.isNaN(limit) ? 8 : limit,

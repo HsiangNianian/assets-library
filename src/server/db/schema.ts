@@ -63,7 +63,7 @@ export const processingJobs = sqliteTable(
     assetId: text("asset_id")
       .notNull()
       .references(() => assets.id),
-    type: text("type", { enum: ["analyze", "cleanup"] }).notNull(),
+    type: text("type", { enum: ["analyze", "embed", "cleanup"] }).notNull(),
     status: text("status", {
       enum: ["queued", "running", "completed", "failed"],
     })

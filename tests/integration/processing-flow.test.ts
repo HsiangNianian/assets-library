@@ -74,7 +74,7 @@ describe("complete asset processing flow", () => {
       sizeBytes: stat.size,
       directPublish: false,
     });
-    expect(repository.listAssets({ view: "pending" }).items).toEqual([
+    expect((await repository.listAssets({ view: "pending" })).items).toEqual([
       expect.objectContaining({
         id: assetId,
         processingStatus: "queued",
@@ -117,25 +117,31 @@ describe("complete asset processing flow", () => {
     ]);
     detail = repository.publishAsset(assetId);
     expect(detail.reviewStatus).toBe("published");
-    expect(repository.listAssets({ view: "pending" }).items).toHaveLength(0);
-    expect(repository.listAssets({ view: "published" }).items).toHaveLength(1);
+    expect((await repository.listAssets({ view: "pending" })).items).toHaveLength(0);
+    expect((await repository.listAssets({ view: "published" })).items).toHaveLength(1);
     expect(
-      repository.listAssets({
+      (await repository.listAssets({
         view: "published",
         tagQuery: "展",
-      }).items,
+      })).items,
     ).toHaveLength(1);
     expect(
-      repository.listAssets({
+      (await repository.listAssets({
+        view: "published",
+        tagQuery: "展斤",
+      })).items,
+    ).toHaveLength(1);
+    expect(
+      (await repository.listAssets({
         view: "published",
         tagQuery: "活动",
-      }).items,
+      })).items,
     ).toHaveLength(0);
     expect(
-      repository.listAssets({
+      (await repository.listAssets({
         view: "published",
         tagQuery: "人工",
-      }).items,
+      })).items,
     ).toHaveLength(0);
 
     const partial = media.mediaResponse(
@@ -256,11 +262,11 @@ describe("complete asset processing flow", () => {
     expect(claimed?.assetId).toBe(assetId);
     expect(repository.heartbeatJob(claimed!)).toBe(1);
     expect(
-      repository
+      (await repository
         .listAssets({
         view: "pending",
         tagQuery: "不会过滤待入库素材",
-        })
+        }))
         .items.some((item) => item.id === assetId),
     ).toBe(true);
     database.db
@@ -280,7 +286,7 @@ describe("complete asset processing flow", () => {
     const [repository] = await Promise.all([
       import("@/server/repositories/assets"),
     ]);
-    const before = repository.listAssets({ view: "pending" }).total;
+    const before = (await repository.listAssets({ view: "pending" })).total;
     for (let index = 0; index < 9; index += 1) {
       repository.createAsset({
         assetId: crypto.randomUUID(),
@@ -296,12 +302,12 @@ describe("complete asset processing flow", () => {
       });
     }
 
-    const firstPage = repository.listAssets({
+    const firstPage = await repository.listAssets({
       view: "pending",
       page: 1,
       limit: 8,
     });
-    const secondPage = repository.listAssets({
+    const secondPage = await repository.listAssets({
       view: "pending",
       page: 2,
       limit: 8,
