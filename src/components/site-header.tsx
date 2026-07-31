@@ -4,13 +4,13 @@ import { Button } from "@/components/ui/button";
 
 export function SiteHeader() {
   return (
-    <header className="sticky top-0 z-20 border-b border-slate-200/80 bg-white/90 backdrop-blur">
-      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-5">
-        <Link href="/" className="flex items-center gap-3 font-semibold">
-          <span className="grid size-9 place-items-center rounded-xl bg-cyan-500 text-slate-950">
+    <header className="sticky top-0 z-20 border-b border-black/[0.06] bg-white/75 backdrop-blur-xl">
+      <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-5">
+        <Link href="/" className="flex items-center gap-2.5 font-semibold tracking-tight">
+          <span className="grid size-8 place-items-center rounded-[0.7rem] bg-[#0071e3] text-white shadow-sm">
             <LibraryBig className="size-5" />
           </span>
-          <span>素材中枢</span>
+          <span>素材库</span>
         </Link>
         <nav className="flex items-center gap-2">
           <Button asChild variant="ghost">

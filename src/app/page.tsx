@@ -4,6 +4,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Images,
+  LayoutGrid,
+  List,
   Search,
   X,
 } from "lucide-react";
@@ -26,11 +28,15 @@ function overviewHref(
   view: AssetOverviewView,
   page: number,
   tagQuery = "",
+  layout: OverviewLayout = "gallery",
 ) {
   const parameters = new URLSearchParams({ view, page: String(page) });
   if (view === "published" && tagQuery) parameters.set("tag", tagQuery);
+  if (layout === "list") parameters.set("layout", layout);
   return `/?${parameters.toString()}`;
 }
+
+type OverviewLayout = "gallery" | "list";
 
 function paginationItems(current: number, total: number) {
   const pages = new Set([1, total, current - 1, current, current + 1]);
@@ -50,11 +56,14 @@ export default async function OverviewPage({
     tag?: string | string[];
     page?: string | string[];
     view?: string | string[];
+    layout?: string | string[];
   }>;
 }) {
   const parameters = await searchParams;
   const view: AssetOverviewView =
     firstParameter(parameters.view) === "pending" ? "pending" : "published";
+  const layout: OverviewLayout =
+    firstParameter(parameters.layout) === "list" ? "list" : "gallery";
   const requestedPage = Number.parseInt(firstParameter(parameters.page) ?? "1", 10);
   const tagQuery =
     view === "published"
@@ -67,86 +76,98 @@ export default async function OverviewPage({
     tagQuery,
   });
   return (
-    <main className="mx-auto max-w-7xl px-5 py-10">
-      <section className="mb-9 flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
+    <main className="mx-auto max-w-7xl px-5 py-7 sm:py-9">
+      <section className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
         <div>
-          <p className="mb-2 text-sm font-semibold tracking-wide text-cyan-700">
-            ASSET LIBRARY
-          </p>
-          <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">
-            素材概览
+          <h1 className="text-2xl font-semibold tracking-[-0.03em] sm:text-3xl">
+            素材库
           </h1>
-          <p className="mt-3 max-w-2xl text-slate-600">
-            上传成功的素材会立即出现在这里，可查看处理状态并完成入库。
+          <p className="mt-1 text-sm text-slate-500">
+            {view === "published" ? "已审核并可供使用的素材" : "等待审核或仍在处理的素材"}
           </p>
         </div>
-        <Button asChild size="lg">
+        <Button asChild>
           <Link href="/upload">
             添加新素材 <ArrowRight className="size-4" />
           </Link>
         </Button>
       </section>
 
-      <div className="mb-7 flex flex-col gap-4">
-        <nav className="flex w-fit rounded-xl border border-slate-200 bg-white p-1">
+      <div className="mb-7 flex flex-col gap-3 rounded-[1.5rem] border border-black/[0.06] bg-white/70 p-3 shadow-sm backdrop-blur-xl sm:flex-row sm:items-center">
+        <nav className="flex w-fit shrink-0 rounded-full bg-black/[0.05] p-1" aria-label="素材视图">
           <Button
             asChild
             variant={view === "published" ? "default" : "ghost"}
+            size="sm"
           >
-            <Link href={overviewHref("published", 1)}>已入库</Link>
+            <Link href={overviewHref("published", 1, tagQuery, layout)}>已入库</Link>
           </Button>
           <Button
             asChild
             variant={view === "pending" ? "default" : "ghost"}
+            size="sm"
           >
-            <Link href={overviewHref("pending", 1)}>待入库</Link>
+            <Link href={overviewHref("pending", 1, "", layout)}>待入库</Link>
           </Button>
         </nav>
 
-        {view === "published" && (
-          <Card>
-            <CardContent className="pt-6">
-              <form
-                action="/"
-                method="get"
-                className="flex flex-col gap-3 sm:flex-row"
-              >
-                <input type="hidden" name="view" value="published" />
-                <div className="relative flex-1">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
-                  <Input
-                    name="tag"
-                    defaultValue={tagQuery}
-                    maxLength={128}
-                    className="pl-9"
-                    aria-label="按标签搜索已入库素材"
-                    placeholder="输入标签搜索，支持错别字容错"
-                  />
-                </div>
-                <Button type="submit">
-                  <Search className="size-4" />
-                  搜索标签
-                </Button>
-                {tagQuery && (
-                  <Button asChild variant="outline">
-                    <Link href={overviewHref("published", 1)}>
-                      <X className="size-4" />
-                      清除
-                    </Link>
-                  </Button>
-                )}
-              </form>
-              <p className="mt-3 text-xs text-slate-500">
-                仅搜索已入库素材的标签，支持包含匹配和轻微错别字容错。
-              </p>
-            </CardContent>
-          </Card>
+        {view === "published" ? (
+          <form action="/" method="get" className="flex flex-1 items-center gap-2">
+            <input type="hidden" name="view" value="published" />
+            {layout === "list" && <input type="hidden" name="layout" value="list" />}
+            <div className="relative flex-1">
+              <Search className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
+              <Input
+                name="tag"
+                defaultValue={tagQuery}
+                maxLength={128}
+                className="pl-10"
+                aria-label="按标签搜索已入库素材"
+                placeholder="搜索标签、场景或风格"
+              />
+            </div>
+            <Button type="submit" size="sm" aria-label="搜索标签">
+              <Search className="size-4" />
+              <span className="hidden sm:inline">搜索</span>
+            </Button>
+            {tagQuery && (
+              <Button asChild variant="ghost" size="sm" aria-label="清除搜索">
+                <Link href={overviewHref("published", 1, "", layout)}>
+                  <X className="size-4" />
+                </Link>
+              </Button>
+            )}
+          </form>
+        ) : (
+          <p className="px-2 text-sm text-slate-500">处理完成后，在这里确认并入库。</p>
         )}
+        <div className="flex shrink-0 rounded-full bg-black/[0.05] p-1" aria-label="布局选择">
+          <Button
+            asChild
+            variant={layout === "gallery" ? "default" : "ghost"}
+            size="sm"
+            aria-label="画廊视图"
+          >
+            <Link href={overviewHref(view, 1, tagQuery, "gallery")}>
+              <LayoutGrid className="size-3.5" />
+            </Link>
+          </Button>
+          <Button
+            asChild
+            variant={layout === "list" ? "default" : "ghost"}
+            size="sm"
+            aria-label="列表视图"
+          >
+            <Link href={overviewHref(view, 1, tagQuery, "list")}>
+              <List className="size-3.5" />
+            </Link>
+          </Button>
+        </div>
       </div>
 
       <div className="mb-5 flex items-end justify-between gap-4">
         <div>
-          <h2 className="text-xl font-semibold">
+          <h2 className="text-lg font-semibold tracking-tight">
             {view === "pending" ? "待入库素材" : "已入库素材"}
           </h2>
           <p className="mt-1 text-sm text-slate-500">
@@ -157,8 +178,8 @@ export default async function OverviewPage({
                 : "已经完成审核并正式入库的素材。"}
           </p>
         </div>
-        <span className="shrink-0 text-sm text-slate-500">
-          共 {page.total} 条
+        <span className="shrink-0 text-sm tabular-nums text-slate-500">
+          {page.total} 项
         </span>
       </div>
 
@@ -198,7 +219,7 @@ export default async function OverviewPage({
           </CardContent>
         </Card>
       ) : (
-        <AssetOverviewGrid assets={page.items} />
+        <AssetOverviewGrid assets={page.items} layout={layout} />
       )}
 
       {page.totalPages > 1 && (
@@ -213,7 +234,7 @@ export default async function OverviewPage({
             className={page.page === 1 ? "pointer-events-none opacity-50" : ""}
           >
             <Link
-              href={overviewHref(view, Math.max(1, page.page - 1), tagQuery)}
+              href={overviewHref(view, Math.max(1, page.page - 1), tagQuery, layout)}
               aria-disabled={page.page === 1}
             >
               <ChevronLeft className="size-4" />
@@ -235,7 +256,7 @@ export default async function OverviewPage({
                 variant={item === page.page ? "default" : "outline"}
                 size="sm"
               >
-                <Link href={overviewHref(view, item, tagQuery)}>{item}</Link>
+                <Link href={overviewHref(view, item, tagQuery, layout)}>{item}</Link>
               </Button>
             ),
           )}
@@ -254,6 +275,7 @@ export default async function OverviewPage({
                 view,
                 Math.min(page.totalPages, page.page + 1),
                 tagQuery,
+                layout,
               )}
               aria-disabled={page.page === page.totalPages}
             >

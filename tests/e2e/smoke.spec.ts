@@ -7,9 +7,9 @@ const png = Buffer.from(
 
 test("overview and upload pages expose the MVP scope", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "素材概览" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "素材库" })).toBeVisible();
   await expect(
-    page.getByText("上传成功的素材会立即出现在这里，可查看处理状态并完成入库。"),
+    page.getByText("已审核并可供使用的素材"),
   ).toBeVisible();
   await expect(
     page.getByRole("link", { name: "待入库", exact: true }),
@@ -21,8 +21,12 @@ test("overview and upload pages expose the MVP scope", async ({ page }) => {
     page.getByRole("textbox", { name: "按标签搜索已入库素材" }),
   ).toBeVisible();
   await expect(
-    page.getByText("仅搜索已入库素材的标签，支持包含匹配和轻微错别字容错。"),
+    page.getByPlaceholder("搜索标签、场景或风格"),
   ).toBeVisible();
+  await page.getByRole("link", { name: "列表视图" }).click();
+  await expect(page).toHaveURL(/layout=list/);
+  await page.getByRole("link", { name: "画廊视图" }).click();
+  await expect(page).not.toHaveURL(/layout=list/);
   await page.getByRole("link", { name: "待入库", exact: true }).click();
   await expect(
     page.getByRole("textbox", { name: "按标签搜索已入库素材" }),
