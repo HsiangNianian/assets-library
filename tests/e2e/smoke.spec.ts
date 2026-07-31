@@ -20,6 +20,9 @@ test("overview and upload pages expose the MVP scope", async ({ page }) => {
   await expect(
     page.getByRole("textbox", { name: "按标签搜索已入库素材" }),
   ).toBeVisible();
+  await page.getByRole("button", { name: "主题：跟随系统" }).click();
+  await page.getByRole("button", { name: "暗色" }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect(
     page.getByPlaceholder("搜索标签、场景或风格"),
   ).toBeVisible();

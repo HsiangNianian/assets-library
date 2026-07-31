@@ -82,7 +82,7 @@ export default async function OverviewPage({
           <h1 className="text-2xl font-semibold tracking-[-0.03em] sm:text-3xl">
             素材库
           </h1>
-          <p className="mt-1 text-sm text-slate-500">
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
             {view === "published" ? "已审核并可供使用的素材" : "等待审核或仍在处理的素材"}
           </p>
         </div>
@@ -93,8 +93,8 @@ export default async function OverviewPage({
         </Button>
       </section>
 
-      <div className="mb-7 flex flex-col gap-3 rounded-[1.5rem] border border-black/[0.06] bg-white/70 p-3 shadow-sm backdrop-blur-xl sm:flex-row sm:items-center">
-        <nav className="flex w-fit shrink-0 rounded-full bg-black/[0.05] p-1" aria-label="素材视图">
+      <div className="mb-7 flex flex-col gap-3 rounded-[1.5rem] border border-black/[0.06] bg-white/70 p-3 shadow-sm backdrop-blur-xl dark:border-white/[0.10] dark:bg-white/[0.06] sm:flex-row sm:items-center">
+        <nav className="flex w-fit shrink-0 rounded-full bg-black/[0.05] p-1 dark:bg-white/[0.10]" aria-label="素材视图">
           <Button
             asChild
             variant={view === "published" ? "default" : "ghost"}
@@ -116,7 +116,7 @@ export default async function OverviewPage({
             <input type="hidden" name="view" value="published" />
             {layout === "list" && <input type="hidden" name="layout" value="list" />}
             <div className="relative flex-1">
-              <Search className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
+              <Search className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-slate-400 dark:text-slate-500" />
               <Input
                 name="tag"
                 defaultValue={tagQuery}
@@ -139,9 +139,9 @@ export default async function OverviewPage({
             )}
           </form>
         ) : (
-          <p className="px-2 text-sm text-slate-500">处理完成后，在这里确认并入库。</p>
+          <p className="px-2 text-sm text-slate-500 dark:text-slate-400">处理完成后，在这里确认并入库。</p>
         )}
-        <div className="flex shrink-0 rounded-full bg-black/[0.05] p-1" aria-label="布局选择">
+        <div className="flex shrink-0 rounded-full bg-black/[0.05] p-1 dark:bg-white/[0.10]" aria-label="布局选择">
           <Button
             asChild
             variant={layout === "gallery" ? "default" : "ghost"}
@@ -170,7 +170,7 @@ export default async function OverviewPage({
           <h2 className="text-lg font-semibold tracking-tight">
             {view === "pending" ? "待入库素材" : "已入库素材"}
           </h2>
-          <p className="mt-1 text-sm text-slate-500">
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
             {view === "pending"
               ? "包含等待解析、解析中、解析失败和解析完成待确认的素材。"
               : tagQuery
@@ -178,7 +178,7 @@ export default async function OverviewPage({
                 : "已经完成审核并正式入库的素材。"}
           </p>
         </div>
-        <span className="shrink-0 text-sm tabular-nums text-slate-500">
+        <span className="shrink-0 text-sm tabular-nums text-slate-500 dark:text-slate-400">
           {page.total} 项
         </span>
       </div>
@@ -186,7 +186,7 @@ export default async function OverviewPage({
       {page.items.length === 0 ? (
         <Card className="border-dashed">
           <CardContent className="flex min-h-80 flex-col items-center justify-center text-center">
-            <span className="mb-5 grid size-16 place-items-center rounded-2xl bg-cyan-50 text-cyan-700">
+            <span className="mb-5 grid size-16 place-items-center rounded-2xl bg-cyan-50 text-cyan-700 dark:bg-cyan-400/10 dark:text-cyan-300">
               <Images className="size-8" />
             </span>
             <h2 className="text-xl font-semibold">
@@ -196,7 +196,7 @@ export default async function OverviewPage({
                   ? "暂无待入库素材"
                   : "暂无已入库素材"}
             </h2>
-            <p className="mt-2 max-w-md text-sm text-slate-500">
+            <p className="mt-2 max-w-md text-sm text-slate-500 dark:text-slate-400">
               {tagQuery
                 ? `没有已入库素材的标签匹配“${tagQuery}”。`
                 : view === "pending"
@@ -245,7 +245,7 @@ export default async function OverviewPage({
             item === "ellipsis" ? (
               <span
                 key={`ellipsis-${index}`}
-                className="px-1 text-sm text-slate-400"
+                className="px-1 text-sm text-slate-400 dark:text-slate-500"
               >
                 …
               </span>

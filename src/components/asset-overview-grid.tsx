@@ -97,11 +97,11 @@ export function AssetOverviewGrid({
         </p>
       )}
       {hasSearchScores && (
-        <div className="flex items-center justify-between rounded-2xl bg-white/55 px-4 py-3 text-sm text-slate-600">
+        <div className="flex items-center justify-between rounded-2xl bg-white/55 px-4 py-3 text-sm text-slate-600 dark:bg-white/[0.06] dark:text-slate-300">
           <span>搜索结果按相关性排序</span>
           <button
             type="button"
-            className="font-medium text-[#0071e3] transition-opacity hover:opacity-70"
+            className="font-medium text-[#0071e3] transition-opacity hover:opacity-70 dark:text-blue-400"
             onClick={() => setShowDiagnostics((visible) => !visible)}
             aria-pressed={showDiagnostics}
           >
@@ -123,7 +123,7 @@ export function AssetOverviewGrid({
           ))}
         </div>
       ) : (
-        <div className="overflow-hidden rounded-[1.5rem] border border-black/[0.06] bg-white/90 shadow-sm">
+        <div className="overflow-hidden rounded-[1.5rem] border border-black/[0.06] bg-white/90 shadow-sm dark:border-white/[0.10] dark:bg-[#1c1c1e]">
           {assets.map((asset, index) => (
             <ListRow
               key={asset.id}
@@ -184,7 +184,7 @@ function AssetTags({ asset }: { asset: AssetSummary }) {
 function Diagnostics({ asset }: { asset: AssetSummary }) {
   if (asset.searchScore === undefined) return null;
   return (
-    <div className="flex flex-wrap gap-2 border-t border-black/[0.06] pt-3 text-xs text-slate-500">
+    <div className="flex flex-wrap gap-2 border-t border-black/[0.06] pt-3 text-xs text-slate-500 dark:border-white/[0.10] dark:text-slate-400">
       <span>排序分：{asset.searchScore.toFixed(1)}</span>
       {asset.semanticScore !== undefined && <span>语义分：{asset.semanticScore.toFixed(3)}</span>}
     </div>
@@ -206,7 +206,7 @@ function GalleryCard({
 }) {
   const canPublish = asset.processingStatus === "completed" && asset.reviewStatus === "pending_review";
   return (
-    <Card className="group h-full overflow-hidden bg-white/90 transition-[box-shadow,transform] duration-300 ease-out hover:-translate-y-0.5 hover:shadow-[0_14px_34px_rgba(0,0,0,0.10)] motion-reduce:transition-none">
+    <Card className="group h-full overflow-hidden bg-white/90 transition-[box-shadow,transform] duration-300 ease-out hover:-translate-y-0.5 hover:shadow-[0_14px_34px_rgba(0,0,0,0.10)] dark:bg-[#1c1c1e] dark:hover:shadow-black/40 motion-reduce:transition-none">
       <button type="button" className="relative block w-full text-left" onClick={onPreview} aria-label={`预览 ${asset.name}`}>
         <div className="aspect-[4/3] overflow-hidden bg-[#e9e9eb]">
           <MediaPreview mediaType={asset.mediaType} src={asset.mediaUrl} name={asset.name} className="transition-transform duration-500 ease-out group-hover:scale-[1.025] motion-reduce:transition-none" />
@@ -220,7 +220,7 @@ function GalleryCard({
           <Link href={`/assets/${asset.id}`} className="truncate font-semibold tracking-tight hover:text-[#0071e3]">
             {asset.name}
           </Link>
-          <span className="shrink-0 text-xs text-slate-400">{asset.reviewStatus === "published" ? "已入库" : "待审核"}</span>
+          <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">{asset.reviewStatus === "published" ? "已入库" : "待审核"}</span>
         </div>
         <AssetStatus asset={asset} />
         <AssetTags asset={asset} />
@@ -253,7 +253,7 @@ function ListRow({
 }) {
   const canPublish = asset.processingStatus === "completed" && asset.reviewStatus === "pending_review";
   return (
-    <article className="flex gap-4 border-b border-black/[0.06] p-3 last:border-0 sm:items-center sm:p-4">
+    <article className="flex gap-4 border-b border-black/[0.06] p-3 last:border-0 dark:border-white/[0.10] sm:items-center sm:p-4">
       <button type="button" className="relative size-20 shrink-0 overflow-hidden rounded-xl bg-[#e9e9eb] sm:size-24" onClick={onPreview} aria-label={`预览 ${asset.name}`}>
         <MediaPreview mediaType={asset.mediaType} src={asset.mediaUrl} name={asset.name} />
       </button>
@@ -262,9 +262,9 @@ function ListRow({
           <Link href={`/assets/${asset.id}`} className="truncate font-semibold tracking-tight hover:text-[#0071e3]">
             {asset.name}
           </Link>
-          <span className="hidden shrink-0 text-xs text-slate-400 sm:inline">{asset.mediaType === "image" ? "图片" : "视频"}</span>
+          <span className="hidden shrink-0 text-xs text-slate-400 dark:text-slate-500 sm:inline">{asset.mediaType === "image" ? "图片" : "视频"}</span>
         </div>
-        <p className="line-clamp-1 text-sm text-slate-500">{asset.description || "暂无描述"}</p>
+        <p className="line-clamp-1 text-sm text-slate-500 dark:text-slate-400">{asset.description || "暂无描述"}</p>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1"><AssetStatus asset={asset} /><AssetTags asset={asset} /></div>
         {showDiagnostics && <Diagnostics asset={asset} />}
       </div>
