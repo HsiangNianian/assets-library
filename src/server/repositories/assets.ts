@@ -169,9 +169,9 @@ export interface ListAssetsOptions {
 
 function tagMatchScore(tag: string, query: string) {
   if (tag === query) return 1_000;
+  if (requiresExactTagMatch(query)) return 0;
   if (tag.startsWith(query)) return 800 - (tag.length - query.length);
   if (tag.includes(query)) return 600 - (tag.length - query.length);
-  if (query.includes(tag)) return 500 - (query.length - tag.length);
 
   // A one-character typo is common for short Chinese tags. Avoid fuzzy
   // matching a single character because it would produce too many false hits.
@@ -179,6 +179,10 @@ function tagMatchScore(tag: string, query: string) {
   const maximumDistance = query.length <= 4 ? 1 : Math.min(3, Math.floor(query.length / 3));
   const distance = levenshteinDistance(tag, query);
   return distance <= maximumDistance ? 300 - distance * 50 : 0;
+}
+
+function requiresExactTagMatch(query: string) {
+  return /[\p{N}\p{Script=Latin}]$/u.test(query);
 }
 
 function levenshteinDistance(left: string, right: string) {
@@ -234,11 +238,15 @@ export async function listAssets({
     ),
   ];
   const scores = normalizedTagQuery ? matchingAssetScores(normalizedTagQuery) : undefined;
+  const exactTagMatchOnly = normalizedTagQuery
+    ? requiresExactTagMatch(normalizedTagQuery)
+    : false;
   const semanticScores = new Map<string, number>();
   if (normalizedTagQuery) {
     try {
       const foundSemanticScores = await searchAnalysis(normalizedTagQuery, safeLimit * 5);
       for (const [assetId, score] of foundSemanticScores) {
+        if (exactTagMatchOnly && !scores?.has(assetId)) continue;
         if (score <= strongSemanticSimilarity && !scores?.has(assetId)) {
           continue;
         }

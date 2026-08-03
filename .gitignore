@@ -145,5 +145,9 @@ vite.config.ts.timestamp-*
 # Asset Library runtime data
 /data/
 /media/
+/chroma-data/
 /playwright-report/
 /test-results/
+
+# Docker Compose override (local, environment-specific)
+compose.override.yaml

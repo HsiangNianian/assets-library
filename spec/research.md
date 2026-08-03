@@ -6,7 +6,7 @@
 
 ## 流式 multipart
 
-Next.js Route Handler 使用 Busboy 读取 Web Stream 并直接写临时文件。类型校验完成后使用原子重命名，避免大视频进入 JS 堆内存或留下半成品素材。
+Next.js Route Handler 使用 Busboy 读取 Web Stream 并直接写临时文件，检查接口对应的扩展名、声明 MIME 和大小后原子重命名并入队。内容签名、解码和视频编码校验由 worker 执行，避免大视频进入 JS 堆内存或长时间占用上传请求。
 
 ## 不转码策略
 
@@ -14,8 +14,8 @@ Next.js Route Handler 使用 Busboy 读取 Web Stream 并直接写临时文件�
 
 ## 模型兼容层
 
-两种协议各自构造请求并统一解析为内部 Zod 模式。图片使用 data URL。视频不直接发送原文件：浏览器用原生 `<video>` 和 Canvas 生成 JPEG 关键帧，服务端保存后由 Chat Completions 以多图片输入分析，因此不依赖公网媒体地址。
+两种协议各自构造请求并统一解析为内部 Zod 模式。图片使用 data URL。视频不直接发送原文件：worker 使用 FFmpeg 生成 JPEG 关键帧并保存，再由 Chat Completions 以多图片输入分析，因此不依赖公网媒体地址。
 
 帧数规则为 `min(5, max(1, ceil(durationSeconds)))`，时间点采用每个等分区间的中点。这样短视频约每秒一帧且避开首尾黑场，超过 5 秒的视频固定覆盖 10%、30%、50%、70%、90%。帧最长边缩放至 1280 像素并以质量 0.85 的 JPEG 编码，在覆盖范围和请求体大小之间取得平衡。
 
-本应用不运行 FFmpeg，也不分析音轨。Qwen3.7 仅用于视觉理解，ASR、语言和字幕输出保持在范围外。Responses 不假设非标准多图片视频分析能力。
+本应用使用 FFmpeg 提取视频画面，但不分析音轨。Qwen3.7 仅用于视觉理解，ASR、语言和字幕输出保持在范围外。Responses 不假设非标准多图片视频分析能力。

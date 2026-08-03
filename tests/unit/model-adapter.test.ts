@@ -75,6 +75,66 @@ describe("model adapter", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  it("retries when model returns English tag values", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "asset-model-language-"));
+    process.env.MEDIA_ROOT = root;
+    process.env.MODEL_PROTOCOL = "openai_chat_completions";
+    process.env.MODEL_BASE_URL = modelBaseUrl;
+    process.env.MODEL_API_KEY = "secret";
+    process.env.MODEL_NAME = "qwen3.7-plus";
+    await fs.mkdir(path.join(root, "language"));
+    await fs.writeFile(path.join(root, "language", "original.png"), "image");
+
+    const response = (tag: string) =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  kind: "image",
+                  description: "终端截图",
+                  tags: {
+                    scene: [],
+                    object: [],
+                    person: [],
+                    style: [],
+                    color_composition: [tag],
+                  },
+                  ocr: { text: null, unavailableReason: "无文字" },
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(response("dark_gray_background"))
+      .mockResolvedValueOnce(response("深灰色背景"));
+
+    const result = await new OpenAICompatibleAnalyzer(loadConfig()).analyze({
+      assetId: "language",
+      mediaType: "image",
+      mimeType: "image/png",
+      relativePath: "language/original.png",
+    });
+
+    expect(result.kind).toBe("image");
+    if (result.kind === "image") {
+      expect(result.tags.color_composition).toEqual(["深灰色背景"]);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const retryBody = JSON.parse(
+      String(fetchMock.mock.calls[1]?.[1]?.body),
+    ) as { messages: Array<{ content: Array<{ text?: string }> }> };
+    expect(retryBody.messages[0]?.content[0]?.text).toContain(
+      "dark_gray_background",
+    );
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
   it("fails video under the Responses protocol without fallback", async () => {
     const config = loadConfig({
       MODEL_PROTOCOL: "openai_responses",

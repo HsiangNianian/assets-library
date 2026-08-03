@@ -51,11 +51,11 @@
 - [x] T032 同步错误契约、环境变量、OpenAPI、README 与规格文档
 - [x] T033 通过 lint、typecheck、test、e2e 和 build
 
-## Phase 7：浏览器分位抽帧
+## Phase 7：视频分位抽帧
 
 - [x] T034 补充分位采样、关键帧上传与多图片模型输入测试
-- [x] T035 实现浏览器 Canvas 抽帧和上传准备进度
-- [x] T036 实现关键帧 multipart 校验、持久化、重试复用与清理
+- [x] T035 实现 worker FFmpeg 抽帧和处理状态推进
+- [x] T036 实现关键帧持久化、重试复用与清理
 - [x] T037 改用带时间点的多图片分析并删除公网签名视频路径
 - [x] T038 同步共享契约、OpenAPI、README 与规格文档
 - [x] T039 通过 lint、typecheck、test、e2e 和 build

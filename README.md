@@ -7,25 +7,47 @@
 - JPEG、PNG、WebP 图片，默认最大 20 MB
 - H.264 编码的 MP4 视频，默认最大 200 MB
 
-视频会在浏览器中提取少量 JPEG 关键帧供视觉分析。音频、URL 上传、服务端抽帧、音轨分析、批量编辑和转码不在本阶段范围内。
+视频上传落盘后由后台 worker 校验，并通过服务端 FFmpeg 提取少量 JPEG 关键帧供视觉分析。音频、URL 上传、音轨分析、批量编辑和转码不在本阶段范围内。
 
 ## 本地运行
 
+环境要求：Node.js 22+、npm、FFmpeg/ffprobe。首次运行：
+
 ```bash
-pnpm install
+npm install
 cp .env.example .env
-pnpm db:migrate
-pnpm dev
+npm run db:migrate
 ```
 
-打开 <http://localhost:3000>。开发命令会同时启动 Web 和后台 worker。
+如需语义搜索，先在终端 1 启动本地 Chroma（需要安装 `uv`）：
+
+```bash
+uvx --from chromadb chroma run \
+  --path ./chroma-data \
+  --host 127.0.0.1 \
+  --port 8100
+```
+
+同时将 `.env` 配置为 `CHROMA_URL=http://127.0.0.1:8100`。不需要语义搜索时，可将 `EMBEDDING_MODEL` 留空并跳过此终端。
+
+在终端 2 启动 Web 和 worker：
+
+```bash
+npm run dev
+```
+
+开发命令同时启动 Next.js Web 与后台 worker，并监听源码变化自动重载。打开 <http://localhost:3000>。若 3000 端口已占用：
+
+```bash
+PORT=3100 npm run dev
+```
 
 接口调用说明见 [API 文档](docs/api.md)，机器可读的接口草案见
 [OpenAPI 文件](spec/contracts/openapi.yaml)，浏览器 Swagger UI 位于 `/api-docs`。
 
 数据库结构以 `src/server/db/schema.ts` 为来源，由 Drizzle migration
 负责创建和升级。Web 与 worker 只打开、配置并复用数据库连接，不会在启动时隐式建表；
-首次运行或拉取包含新迁移的代码后，需要先执行 `pnpm db:migrate`。
+首次运行或拉取包含新迁移的代码后，需要先执行 `npm run db:migrate`。
 
 ## 模型配置
 
@@ -44,14 +66,14 @@ NewAPI 令牌，网关关闭鉴权时可以留空；留空后请求不会发送 
 MODEL_ENABLE_THINKING=false
 ```
 
-视频分析使用 Chat Completions 的多图片输入。浏览器按视频时长提取 1–5 张 JPEG 关键帧，worker 将关键帧及其时间点交给模型；原始 MP4 只用于存储和预览。配置：
+视频分析使用 Chat Completions 的多图片输入。worker 按视频时长在服务端提取 1–5 张 JPEG 关键帧，并将关键帧及其时间点交给模型；原始 MP4 只用于存储和预览。配置：
 
 ```dotenv
 MODEL_VIDEO_MODE=frames
 MODEL_VIDEO_TIMEOUT_MS=300000
 ```
 
-不超过 5 秒的视频每秒取一帧（向上取整，至少一帧），超过 5 秒的视频固定取五帧；时间点均为各等分区间的中点，因此长视频取 10%、30%、50%、70%、90% 位置。关键帧最长边限制为 1280 像素，并以质量 0.85 的 JPEG 保存。视频大小不再影响模型传递策略，也不需要公网 URL。
+不超过 5 秒的视频每秒取一帧（向上取整，至少一帧），超过 5 秒的视频固定取五帧；时间点均为各等分区间的中点，因此长视频取 10%、30%、50%、70%、90% 位置。FFmpeg 以 JPEG 保存关键帧。视频大小不再影响模型传递策略，也不需要公网 URL。
 
 Responses 协议或禁用视频能力时，视频任务会明确失败为 `model_video_unsupported`。当前只分析画面，不处理音轨、ASR、语言或字幕。
 
@@ -70,7 +92,7 @@ Responses 协议或禁用视频能力时，视频任务会明确失败为 `model
 留空时复用 `MODEL_BASE_URL`；embedding 模型必须与查询阶段相同）：
 
 ```dotenv
-CHROMA_URL=http://127.0.0.1:8000
+CHROMA_URL=http://127.0.0.1:8100
 EMBEDDING_MODEL=text-embedding-3-small
 EMBEDDING_BASE_URL=
 EMBEDDING_API_KEY=
@@ -81,9 +103,9 @@ EMBEDDING_API_KEY=
 Web 与 worker 必须共享同一 SQLite 文件和媒体目录：
 
 ```bash
-pnpm build
-pnpm start:web
-pnpm start:worker
+npm run build
+npm run start:web
+npm run start:worker
 ```
 
 该模式要求持久磁盘和长期 Node 进程，不支持 Serverless。建议由反向代理提供 HTTPS、请求体限制和内网访问控制。
@@ -214,7 +236,7 @@ docker run -d \
   -v assets-library-data:/app/data \
   -v assets-library-media:/app/media \
   ghcr.io/onestudentforcode/assets-library:latest \
-  pnpm start:worker
+  npm run start:worker
 ```
 
 查看运行状态与日志：
@@ -237,11 +259,11 @@ docker rm assets-library-web assets-library-worker
 ## 验证
 
 ```bash
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm test:e2e
-pnpm build
+npm run lint
+npm run typecheck
+npm test
+npm run test:e2e
+npm run build
 ```
 
 更完整的验收步骤见 [spec/quickstart.md](spec/quickstart.md)。
