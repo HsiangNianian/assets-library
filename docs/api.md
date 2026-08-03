@@ -24,7 +24,7 @@
 
 ### `POST /api/uploads/images`
 
-上传一张图片。请求会立即返回 `202`，实际分析与向量索引由后台 worker 异步执行。
+上传一张图片。文件流式落盘并入队后返回 `202`；内容校验、分析与向量索引由后台 worker 异步执行。
 
 请求类型：`multipart/form-data`
 
@@ -33,11 +33,11 @@
 | `file` | 文件 | 是 | 单个 JPEG、PNG、WebP 图片。 |
 | `directPublish` | `"true"` / `"false"` | 否 | 为 `true` 时，分析成功后直接入库；默认 `false`。 |
 
-图片默认最大 20 MiB，视频默认最大 7 MiB（千问调用方决定，留有3MiB余量）；可由 `MAX_IMAGE_BYTES`、`MAX_VIDEO_BYTES` 配置覆盖。
+图片默认最大 20 MiB，视频默认最大 200 MiB；可由 `MAX_IMAGE_BYTES`、`MAX_VIDEO_BYTES` 配置覆盖。
 
 ### `POST /api/uploads/videos`
 
-上传一个 H.264 MP4 视频。请求只需包含视频文件；服务端使用 FFmpeg 自动均匀抽取 1–5 张 JPEG 关键帧，再由后台 worker 分析。
+上传一个 H.264 MP4 视频。文件流式落盘并入队后返回 `202`；worker 随后校验 MP4/H.264 内容，使用服务端 FFmpeg 均匀抽取 1–5 张 JPEG 关键帧，再调用模型分析。
 
 视频示例：
 
@@ -68,7 +68,7 @@ curl -X POST http://localhost:3000/api/uploads/videos \
 
 成功响应：`200 OK`，字段与上传接口响应相同。
 
-`processingStatus` 可能为：`queued`、`validating`、`analyzing`、`completed`、`failed`。
+`processingStatus` 可能为：`queued`、`validating`、`analyzing`、`completed`、`failed`。`validating` 阶段执行图片签名/解码或 MP4/H.264 校验；视频关键帧也在此阶段提取。
 
 ## 素材查询
 

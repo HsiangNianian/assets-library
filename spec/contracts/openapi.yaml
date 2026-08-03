@@ -25,7 +25,7 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
   /api/uploads/videos:
     post:
-      summary: 上传 H.264 MP4 视频并由服务端自动提取关键帧
+      summary: 上传 H.264 MP4 视频并异步校验、提取关键帧
       requestBody:
         required: true
         content:
@@ -38,7 +38,7 @@ paths:
                 directPublish: { type: boolean }
       responses:
         "202":
-          description: 视频已接收，关键帧会在服务端提取后进入后台处理
+          description: 视频已落盘入队；worker 将校验内容并在服务端提取关键帧
           content:
             application/json:
               schema: { $ref: "#/components/schemas/UploadStatus" }

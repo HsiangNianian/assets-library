@@ -8,11 +8,8 @@ import { AppError, errorResponse } from "@/server/errors";
 import {
   moveIntoAssetStorage,
   removeAssetFiles,
-  storeVideoFrames,
   temporaryUploadPath,
 } from "@/server/media/storage";
-import { validateMediaFile } from "@/server/media/validate";
-import { extractVideoFrames } from "@/server/media/video-frames";
 import { createAsset } from "@/server/repositories/assets";
 import type { MediaType } from "@/shared/contracts";
 
@@ -39,8 +36,10 @@ function removeTemporaryFile(pathToRemove: string) {
   }
 }
 
-function parseMultipart(request: Request): Promise<ParsedUpload> {
-  const config = loadConfig();
+function parseMultipart(
+  request: Request,
+  maximumBytes: number,
+): Promise<ParsedUpload> {
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.startsWith("multipart/form-data")) {
     throw new AppError("invalid_request", "请求必须使用 multipart/form-data。");
@@ -53,7 +52,7 @@ function parseMultipart(request: Request): Promise<ParsedUpload> {
       defParamCharset: "utf8",
       limits: {
         files: 1,
-        fileSize: Math.max(config.MAX_IMAGE_BYTES, config.MAX_VIDEO_BYTES),
+        fileSize: maximumBytes,
       },
     });
     let temporaryPath = "";
@@ -131,33 +130,61 @@ function parseMultipart(request: Request): Promise<ParsedUpload> {
   });
 }
 
+function uploadExtension(
+  filename: string,
+  declaredMime: string,
+  expectedMediaType: MediaType,
+) {
+  const extension = path.extname(filename).toLowerCase();
+  if (expectedMediaType === "video") {
+    if (extension !== ".mp4" || declaredMime !== "video/mp4") {
+      throw new AppError(
+        "unsupported_media_type",
+        "视频接口仅接受 H.264 MP4 视频。",
+      );
+    }
+    return extension;
+  }
+  const imageTypes = new Map([
+    [".jpg", "image/jpeg"],
+    [".jpeg", "image/jpeg"],
+    [".png", "image/png"],
+    [".webp", "image/webp"],
+  ]);
+  if (imageTypes.get(extension) !== declaredMime) {
+    throw new AppError("unsupported_media_type", "图片接口仅接受 JPEG、PNG 、jpg或 WebP 图片。");
+  }
+  return extension;
+}
+
 async function handleUpload(request: Request, expectedMediaType: MediaType) {
   let parsed: ParsedUpload | null = null;
   let storedPath: string | null = null;
-  let extractedFrames: Awaited<ReturnType<typeof extractVideoFrames>> | null = null;
   try {
-    parsed = await parseMultipart(request);
-    const validated = await validateMediaFile(parsed.temporaryPath, parsed.filename, parsed.mimeType, parsed.sizeBytes);
-    if (validated.mediaType !== expectedMediaType) {
-      throw new AppError("unsupported_media_type", expectedMediaType === "image" ? "图片接口仅接受图片。" : "视频接口仅接受 H.264 MP4 视频。");
-    }
-    if (validated.mediaType === "video") extractedFrames = await extractVideoFrames(parsed.temporaryPath);
+    const config = loadConfig();
+    parsed = await parseMultipart(
+      request,
+      expectedMediaType === "image"
+        ? config.MAX_IMAGE_BYTES
+        : config.MAX_VIDEO_BYTES,
+    );
+    const extension = uploadExtension(
+      parsed.filename,
+      parsed.mimeType,
+      expectedMediaType,
+    );
     const assetId = crypto.randomUUID();
     const uploadId = crypto.randomUUID();
-    storedPath = moveIntoAssetStorage(parsed.temporaryPath, assetId, validated.extension);
-    if (extractedFrames) {
-      storeVideoFrames(storedPath, extractedFrames.uploads, extractedFrames.metadata);
-    }
+    storedPath = moveIntoAssetStorage(parsed.temporaryPath, assetId, extension);
     const name = path.basename(parsed.filename, path.extname(parsed.filename)).trim() || "未命名素材";
     const status = createAsset({
       assetId, uploadId, name: name.slice(0, 255), originalFilename: parsed.filename,
-      originalPath: storedPath, mimeType: validated.mimeType, declaredMime: parsed.mimeType,
-      mediaType: validated.mediaType, sizeBytes: parsed.sizeBytes, directPublish: parsed.directPublish,
+      originalPath: storedPath, mimeType: parsed.mimeType, declaredMime: parsed.mimeType,
+      mediaType: expectedMediaType, sizeBytes: parsed.sizeBytes, directPublish: parsed.directPublish,
     });
     return Response.json(status, { status: 202 });
   } catch (error) {
     if (parsed?.temporaryPath) removeTemporaryFile(parsed.temporaryPath);
-    for (const frame of extractedFrames?.uploads ?? []) removeTemporaryFile(frame.temporaryPath);
     if (storedPath) {
       try { removeAssetFiles(storedPath); } catch { /* preserve upload error */ }
     }

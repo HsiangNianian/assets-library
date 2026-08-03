@@ -127,15 +127,16 @@ describe("streaming upload route", () => {
       "file",
       new File([mp4Bytes], "missing.mp4", { type: "video/mp4" }),
     );
-    const rejected = await postVideo(
+    const accepted = await postVideo(
       new Request("http://localhost/api/uploads/videos", {
         method: "POST",
         body: videoOnly,
       }),
     );
-    expect(rejected.status).toBe(400);
-    await expect(rejected.json()).resolves.toMatchObject({
-      error: { code: "invalid_video_frames" },
+    expect(accepted.status).toBe(202);
+    await expect(accepted.json()).resolves.toMatchObject({
+      mediaType: "video",
+      processingStatus: "queued",
     });
   });
 });

@@ -144,6 +144,48 @@ describe("complete asset processing flow", () => {
       })).items,
     ).toHaveLength(0);
 
+    repository.updateAssetMetadata(assetId, {
+      name: "活动主视觉",
+      description: "人工确认后的描述",
+      tags: [{ category: "object", value: "终端1" }],
+    });
+    expect(
+      (await repository.listAssets({
+        view: "published",
+        tagQuery: "终端",
+      })).items,
+    ).toHaveLength(1);
+    expect(
+      (await repository.listAssets({
+        view: "published",
+        tagQuery: "终端1",
+      })).items,
+    ).toHaveLength(1);
+
+    repository.updateAssetMetadata(assetId, {
+      name: "活动主视觉",
+      description: "人工确认后的描述",
+      tags: [{ category: "object", value: "终端" }],
+    });
+    expect(
+      (await repository.listAssets({
+        view: "published",
+        tagQuery: "终端1",
+      })).items,
+    ).toHaveLength(0);
+
+    repository.updateAssetMetadata(assetId, {
+      name: "活动主视觉",
+      description: "人工确认后的描述",
+      tags: [{ category: "object", value: "终端2" }],
+    });
+    expect(
+      (await repository.listAssets({
+        view: "published",
+        tagQuery: "终端1",
+      })).items,
+    ).toHaveLength(0);
+
     const partial = media.mediaResponse(
       assetId,
       new Request("http://localhost/media", {
@@ -218,7 +260,9 @@ describe("complete asset processing flow", () => {
 
     const job = repository.claimNextJob();
     expect(job?.assetId).toBe(assetId);
-    await processing.processJob(job!, analyzer);
+    await processing.processJob(job!, analyzer, async () => ({
+      mimeType: "video/mp4",
+    }));
 
     const detail = repository.getAssetDetail(assetId);
     expect(detail.analysis).toMatchObject({
