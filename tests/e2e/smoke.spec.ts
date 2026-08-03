@@ -72,7 +72,10 @@ test("submits every selected asset as an independent upload", async ({
   await page.route("**/api/uploads**", async (route) => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
-    if (request.method() === "POST" && pathname === "/api/uploads") {
+    if (
+      request.method() === "POST" &&
+      (pathname === "/api/uploads/images" || pathname === "/api/uploads/videos")
+    ) {
       uploadCount += 1;
       const suffix = String(uploadCount).padStart(12, "0");
       await route.fulfill({

@@ -22,30 +22,29 @@
 
 ## 上传与处理状态
 
-### `POST /api/uploads`
+### `POST /api/uploads/images`
 
-上传一个图片或视频。请求会立即返回 `202`，实际解析、分析与向量索引由后台 worker 异步执行。
+上传一张图片。请求会立即返回 `202`，实际分析与向量索引由后台 worker 异步执行。
 
 请求类型：`multipart/form-data`
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `file` | 文件 | 是 | 单个 JPEG、PNG、WebP 图片，或 H.264 编码 MP4。 |
+| `file` | 文件 | 是 | 单个 JPEG、PNG、WebP 图片。 |
 | `directPublish` | `"true"` / `"false"` | 否 | 为 `true` 时，分析成功后直接入库；默认 `false`。 |
-| `frame` | JPEG 文件，可重复 | 仅视频 | 浏览器生成的关键帧，1–5 张。图片不得传此字段。 |
-| `frameMetadata` | JSON 字符串 | 仅视频 | `durationSeconds` 和关键帧时间点。时间点必须符合服务端采样策略。 |
 
 图片默认最大 20 MiB，视频默认最大 7 MiB（千问调用方决定，留有3MiB余量）；可由 `MAX_IMAGE_BYTES`、`MAX_VIDEO_BYTES` 配置覆盖。
+
+### `POST /api/uploads/videos`
+
+上传一个 H.264 MP4 视频。请求只需包含视频文件；服务端使用 FFmpeg 自动均匀抽取 1–5 张 JPEG 关键帧，再由后台 worker 分析。
 
 视频示例：
 
 ```bash
-curl -X POST http://localhost:3000/api/uploads \
+curl -X POST http://localhost:3000/api/uploads/videos \
   -F 'file=@demo.mp4;type=video/mp4' \
-  -F 'directPublish=false' \
-  -F 'frame=@frame-1.jpg;type=image/jpeg' \
-  -F 'frame=@frame-2.jpg;type=image/jpeg' \
-  -F 'frameMetadata={"durationSeconds":2,"timestamps":[0.5,1.5]}'
+  -F 'directPublish=false'
 ```
 
 成功响应：`202 Accepted`
@@ -120,6 +119,46 @@ curl 'http://localhost:3000/api/assets?view=published&page=1&limit=8&tag=%E6%B0%
 
 - `searchScore` 是最终排序分，取标签匹配与语义匹配的较高值。
 - `semanticScore` 是 0–1 的向量相似度。仅大于 `0.55` 的语义结果可单独返回；`(0.45, 0.55]` 区间必须同时命中标签；不超过 `0.45` 的语义结果会过滤。
+
+### `POST /api/search`
+
+根据自然语言描述检索已入库素材。该接口默认返回相似度最高的 5 个结果；传入 `keywords` 时，服务会先复用标签搜索的模糊匹配规则（精确、前缀、包含与轻微错别字容错）进行 **AND** 粗筛，再把候选 ID 交给 Chroma 执行向量检索。
+
+```bash
+curl -X POST http://localhost:3000/api/search \
+  -H 'content-type: application/json' \
+  --data '{
+    "description": "白色背景下的橙色柑橘产品静物图",
+    "keywords": ["白色", "橙子"],
+    "limit": 5
+  }'
+```
+
+请求字段：
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `description` | 字符串，1–1,000 字符 | — | 用于 embedding 的自然语言描述。 |
+| `keywords` | 字符串数组，最多 10 项 | 无 | 可选的标签粗筛条件；每个关键词都必须按现有标签模糊匹配规则命中同一素材。 |
+| `limit` | 整数，1–20 | `5` | 返回的最大素材数量。 |
+
+成功响应：`200 OK`
+
+```json
+{
+  "items": [
+    {
+      "id": "3c3eb3fd-e239-4d85-8a2c-e99f2b175c4a",
+      "name": "产品主视觉",
+      "mediaType": "image",
+      "semanticScore": 0.612,
+      "searchScore": 153
+    }
+  ]
+}
+```
+
+Chroma 或 embedding 服务未配置时返回 `503`；没有符合关键词粗筛或语义阈值的结果时返回 `200` 与空数组。
 
 ### `GET /api/assets/{assetId}`
 

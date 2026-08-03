@@ -115,6 +115,13 @@ export const assetEditSchema = z.object({
 });
 export type AssetEdit = z.infer<typeof assetEditSchema>;
 
+export const descriptionSearchSchema = z.object({
+  description: z.string().trim().min(1).max(1_000),
+  keywords: z.array(z.string().trim().min(1).max(64)).max(10).optional(),
+  limit: z.number().int().min(1).max(20).default(5),
+});
+export type DescriptionSearch = z.infer<typeof descriptionSearchSchema>;
+
 export interface AssetSummary {
   id: string;
   name: string;

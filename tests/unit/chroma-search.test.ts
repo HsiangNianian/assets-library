@@ -56,7 +56,8 @@ describe("Chroma analysis index", () => {
 
   it("converts a keyword embedding query into asset relevance scores", async () => {
     configureEmbedding();
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      void init;
       const url = String(input);
       if (url.endsWith("/embeddings")) {
         return Response.json({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
@@ -77,12 +78,15 @@ describe("Chroma analysis index", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const scores = await searchAnalysis("科技活动", 10);
+    const scores = await searchAnalysis("科技活动", 10, ["asset-1", "asset-2"]);
     expect(scores.get("asset-1")).toBeCloseTo(1 / 1.1);
     expect(scores.get("asset-2")).toBeCloseTo(0.5);
     expect(scores.has("below-threshold")).toBe(false);
     expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain(
       "/collections/collection-id/query",
     );
+    expect(JSON.parse(String(fetchMock.mock.calls.at(-1)?.[1]?.body))).toMatchObject({
+      where: { assetId: { $in: ["asset-1", "asset-2"] } },
+    });
   });
 });

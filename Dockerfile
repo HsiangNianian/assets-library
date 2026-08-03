@@ -41,6 +41,9 @@ RUN pnpm build
 
 FROM base AS runner
 
+ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
+ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
+
 ENV COREPACK_HOME=/pnpm/corepack
 ENV HOME=/home/node
 ENV NODE_ENV=production
@@ -52,12 +55,21 @@ ENV MEDIA_ROOT=/app/media
 
 WORKDIR /app
 
+RUN sed -i \
+      -e "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
+      -e "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+      /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # The worker is TypeScript and uses tsx, so retain its runtime dependency and
 # source files in addition to the standalone Next.js output.
 COPY --from=builder /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/src ./src
+COPY --from=builder /app/spec ./spec
 COPY --from=builder /app/drizzle ./drizzle
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint

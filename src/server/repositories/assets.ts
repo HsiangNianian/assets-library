@@ -19,6 +19,7 @@ import {
   type AssetPage,
   type AssetSummary,
   type AssetTag,
+  type DescriptionSearch,
   type FailureCode,
   type UploadStatus,
 } from "@/shared/contracts";
@@ -288,6 +289,59 @@ export async function listAssets({
     total,
     totalPages,
   };
+}
+
+function publishedAssetIdsMatchingKeywords(keywords: string[]) {
+  if (!keywords.length) return undefined;
+  const matchesByKeyword = keywords.map((keyword) => matchingAssetScores(keyword));
+  const firstMatches = matchesByKeyword[0];
+  if (!firstMatches?.size) return [];
+  const matchedAssetIds = [...firstMatches.keys()].filter((assetId) =>
+    matchesByKeyword.every((matches) => matches.has(assetId)),
+  );
+  if (!matchedAssetIds.length) return [];
+  return db
+    .select({ id: assets.id })
+    .from(assets)
+    .where(and(eq(assets.reviewStatus, "published"), inArray(assets.id, matchedAssetIds)))
+    .all()
+    .map((row) => row.id);
+}
+
+export async function searchAssetsByDescription({
+  description,
+  keywords = [],
+  limit,
+}: DescriptionSearch) {
+  const normalizedKeywords = [...new Set(keywords.map((keyword) => keyword.toLocaleLowerCase()))];
+  const candidateIds = publishedAssetIdsMatchingKeywords(normalizedKeywords);
+  if (candidateIds?.length === 0) return [];
+  const scores = await searchAnalysis(
+    description,
+    Math.max(limit * 5, limit),
+    candidateIds,
+  );
+  const rankedIds = [...scores.entries()]
+    .sort(([, leftScore], [, rightScore]) => rightScore - leftScore)
+    .slice(0, limit)
+    .map(([assetId]) => assetId);
+  if (!rankedIds.length) return [];
+  const rows = db
+    .select()
+    .from(assets)
+    .where(and(eq(assets.reviewStatus, "published"), inArray(assets.id, rankedIds)))
+    .all();
+  const rowsById = new Map(rows.map((row) => [row.id, row]));
+  const tagMap = getTagsForAssets(rankedIds);
+  return rankedIds.flatMap((assetId) => {
+    const row = rowsById.get(assetId);
+    if (!row) return [];
+    return [{
+      ...summaryFromRow(row, tagMap.get(assetId) ?? []),
+      searchScore: Math.round((scores.get(assetId) ?? 0) * 250),
+      semanticScore: scores.get(assetId),
+    }];
+  });
 }
 
 export function getAssetDetail(assetId: string): AssetDetail {

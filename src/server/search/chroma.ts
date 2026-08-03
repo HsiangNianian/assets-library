@@ -117,8 +117,13 @@ export async function indexAnalysis(assetId: string, result: AnalysisResult) {
   });
 }
 
-export async function searchAnalysis(query: string, limit: number) {
+export async function searchAnalysis(
+  query: string,
+  limit: number,
+  assetIds?: string[],
+) {
   if (!semanticSearchEnabled()) return new Map<string, number>();
+  if (assetIds && assetIds.length === 0) return new Map<string, number>();
   const vectors = await embed([tokenize(query)]);
   if (!vectors.length) return new Map<string, number>();
   const target = await collection();
@@ -131,6 +136,7 @@ export async function searchAnalysis(query: string, limit: number) {
       query_embeddings: vectors,
       n_results: limit,
       include: ["metadatas", "distances"],
+      ...(assetIds ? { where: { assetId: { $in: assetIds } } } : {}),
     }),
   });
   const scores = new Map<string, number>();

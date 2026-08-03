@@ -9,11 +9,11 @@ export function openDatabase(databasePath: string) {
   fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
   const sqlite = new Database(resolvedPath);
   sqlite.pragma("busy_timeout = 5000");
-  // Setting journal_mode acquires a write lock. API route modules are imported
-  // during `next build`, potentially while the worker is writing, so only
-  // change it when this database has not already been configured for WAL.
-  const journalMode = String(sqlite.pragma("journal_mode", { simple: true })).toLowerCase();
-  if (journalMode !== "wal") sqlite.pragma("journal_mode = WAL");
+  // `journal_mode` is a database-wide setting and obtains a write lock. It is
+  // configured once by initializeDatabase(), which is serialized by the
+  // container entrypoint. Keeping ordinary connections read-only with respect
+  // to this setting prevents route-module imports during `next build` from
+  // contending with the worker.
   sqlite.pragma("foreign_keys = ON");
   return { sqlite, db: drizzle(sqlite, { schema }) };
 }

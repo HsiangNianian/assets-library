@@ -23,6 +23,10 @@ export function initializeDatabase(
 ) {
   const connection = openDatabase(databasePath);
   try {
+    // This is the only place that changes the database-wide journal mode.
+    // Docker runs it under flock before starting either the web server or the
+    // worker, so concurrent service startup cannot race this PRAGMA.
+    connection.sqlite.pragma("journal_mode = WAL");
     migrateDatabase(connection, migrationsFolder);
     return connection;
   } catch (error) {
