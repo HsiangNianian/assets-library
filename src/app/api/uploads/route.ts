@@ -152,7 +152,7 @@ function uploadExtension(
     [".webp", "image/webp"],
   ]);
   if (imageTypes.get(extension) !== declaredMime) {
-    throw new AppError("unsupported_media_type", "图片接口仅接受 JPEG、PNG 或 WebP 图片。");
+    throw new AppError("unsupported_media_type", "图片接口仅接受 JPEG、PNG 、jpg或 WebP 图片。");
   }
   return extension;
 }
