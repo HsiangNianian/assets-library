@@ -6,7 +6,7 @@ import { openDatabase } from "@/server/db/connection";
 import { initializeDatabase } from "@/server/db/migrations";
 
 describe("database initialization", () => {
-  it("opens and configures a connection without implicitly creating tables", () => {
+  it("opens a connection without implicitly creating tables or changing journal mode", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "asset-db-open-"));
     const connection = openDatabase(path.join(directory, "assets.db"));
     const tableNames = connection.sqlite
@@ -14,7 +14,7 @@ describe("database initialization", () => {
       .all();
     expect(tableNames).toEqual([]);
     expect(connection.sqlite.pragma("journal_mode", { simple: true })).toBe(
-      "wal",
+      "delete",
     );
     connection.sqlite.close();
     fs.rmSync(directory, { recursive: true, force: true });

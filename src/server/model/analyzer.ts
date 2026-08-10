@@ -45,7 +45,8 @@ function promptFor(mediaType: MediaType, correction?: string) {
       ? "输入是按时间分位采样的关键帧。只分析画面，不分析音轨，不输出 ASR 或语言。根据每帧标注时间生成时间轴，时间必须使用秒。"
       : "识别画面与可见文字；无法识别 OCR 时提供 unavailableReason。";
   return [
-    "你是素材库分析器。请使用简体中文描述和标签。",
+    "你是素材库分析器。描述、topics 和所有标签值必须使用简体中文。",
+    "每个标签值必须至少包含一个中文汉字；禁止英文标签、拼音和 snake_case。JSON 字段名与标签分类键保持结构中规定的英文。",
     scope,
     "只输出一个 JSON 对象，不要 Markdown、代码围栏或解释。",
     `必须严格符合此结构：${mediaType === "image" ? imageShape : videoShape}`,
@@ -53,6 +54,24 @@ function promptFor(mediaType: MediaType, correction?: string) {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+const chineseCharacterPattern = /\p{Script=Han}/u;
+
+function requireChineseLabels(result: AnalysisResult) {
+  const labels =
+    result.kind === "image"
+      ? Object.values(result.tags).flat()
+      : [...result.topics, ...Object.values(result.tags).flat()];
+  const invalidLabels = labels.filter(
+    (label) => !chineseCharacterPattern.test(label),
+  );
+  if (invalidLabels.length > 0) {
+    throw new Error(
+      `标签值必须使用简体中文，以下值不合格：${invalidLabels.slice(0, 8).join("、")}`,
+    );
+  }
+  return result;
 }
 
 function stripCodeFence(value: string) {
@@ -208,7 +227,9 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
         const payload: unknown = await response.json();
         const text = isChat ? extractChatText(payload) : extractResponsesText(payload);
         try {
-          return analysisResultSchema.parse(JSON.parse(stripCodeFence(text)));
+          return requireChineseLabels(
+            analysisResultSchema.parse(JSON.parse(stripCodeFence(text))),
+          );
         } catch (error) {
           correction =
             error instanceof Error ? error.message.slice(0, 500) : "JSON 格式错误";

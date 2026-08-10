@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assetEditSchema,
+  descriptionSearchSchema,
   imageAnalysisSchema,
   uploadStatusSchema,
   videoAnalysisSchema,
@@ -58,5 +59,19 @@ describe("shared contracts", () => {
     });
     expect(edit.name).toBe("海报");
     expect(edit.tags[0]?.value).toBe("室内");
+  });
+
+  it("defaults and bounds description search requests", () => {
+    expect(
+      descriptionSearchSchema.parse({
+        description: "  白色背景下的柑橘产品图  ",
+        keywords: ["  白色 ", "橙子"],
+      }),
+    ).toEqual({
+      description: "白色背景下的柑橘产品图",
+      keywords: ["白色", "橙子"],
+      limit: 5,
+    });
+    expect(() => descriptionSearchSchema.parse({ description: "x", limit: 21 })).toThrow();
   });
 });

@@ -1,6 +1,7 @@
 import {
   claimNextJob,
   recoverStaleJobs,
+  requeueFailedEmbeddingJobs,
 } from "@/server/repositories/assets";
 import { loadConfig } from "@/server/config";
 import { processJob } from "@/server/services/processing";
@@ -19,6 +20,10 @@ process.on("SIGTERM", () => {
 async function main() {
   const config = loadConfig();
   recoverStaleJobs();
+  const requeuedEmbeddings = requeueFailedEmbeddingJobs();
+  if (requeuedEmbeddings > 0) {
+    console.log(`Requeued ${requeuedEmbeddings} failed embedding job(s).`);
+  }
   const recoveryTimer = setInterval(() => {
     const recovered = recoverStaleJobs();
     if (recovered > 0) {

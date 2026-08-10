@@ -16,7 +16,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import type { UploadStatus } from "@/shared/contracts";
-import { extractVideoFrames } from "./extract-video-frames";
 
 interface ApiError {
   error?: { message?: string };
@@ -24,7 +23,6 @@ interface ApiError {
 
 type UploadPhase =
   | "queued"
-  | "extracting"
   | "uploading"
   | "processing"
   | "completed"
@@ -40,9 +38,31 @@ interface UploadItem {
   error: string;
 }
 
+function createUploadId(): string {
+  const browserCrypto = globalThis.crypto;
+  if (typeof browserCrypto?.randomUUID === "function") {
+    return browserCrypto.randomUUID();
+  }
+
+  const bytes = new Uint8Array(16);
+  if (browserCrypto?.getRandomValues) {
+    browserCrypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  return Array.from(bytes, (byte, index) => {
+    const separator = [4, 6, 8, 10].includes(index) ? "-" : "";
+    return `${separator}${byte.toString(16).padStart(2, "0")}`;
+  }).join("");
+}
+
 const phaseLabels: Record<UploadPhase, string> = {
   queued: "等待上传",
-  extracting: "提取关键帧",
   uploading: "正在上传",
   processing: "正在分析",
   completed: "分析完成",
@@ -170,30 +190,13 @@ export function UploadForm() {
     publishAfterAnalysis: boolean,
   ) => {
     const body = new FormData();
-    try {
-      body.append("file", item.file);
-      if (isVideo(item.file)) {
-        updateItem(item.id, { phase: "extracting", progress: 5, error: "" });
-        const extracted = await extractVideoFrames(item.file);
-        if (!mountedRef.current) return;
-        for (const frame of extracted.frames) body.append("frame", frame);
-        body.append("frameMetadata", JSON.stringify(extracted.metadata));
-      }
-      body.append("directPublish", String(publishAfterAnalysis));
-    } catch (cause) {
-      updateItem(item.id, {
-        phase: "failed",
-        progress: 0,
-        error:
-          cause instanceof Error ? cause.message : "视频关键帧提取失败。",
-      });
-      return;
-    }
+    body.append("file", item.file);
+    body.append("directPublish", String(publishAfterAnalysis));
 
     updateItem(item.id, { phase: "uploading", progress: 0, error: "" });
     await new Promise<void>((resolve) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/uploads");
+      xhr.open("POST", isVideo(item.file) ? "/api/uploads/videos" : "/api/uploads/images");
       xhr.upload.onprogress = (event) => {
         if (mountedRef.current && event.lengthComputable) {
           updateItem(item.id, {
@@ -262,7 +265,7 @@ export function UploadForm() {
       const previewUrl = URL.createObjectURL(file);
       previewUrlsRef.current.add(previewUrl);
       return {
-        id: crypto.randomUUID(),
+        id: createUploadId(),
         file,
         previewUrl,
         phase: "queued",
@@ -407,8 +410,7 @@ export function UploadForm() {
                         </span>
                         <span>{phaseLabels[item.phase]}</span>
                       </div>
-                      {(item.phase === "extracting" ||
-                        item.phase === "uploading" ||
+                      {(item.phase === "uploading" ||
                         item.phase === "processing") && (
                         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
                           <div

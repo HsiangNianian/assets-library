@@ -32,7 +32,7 @@ describe("streaming upload route", () => {
       .toBuffer();
     const imageBytes = new ArrayBuffer(png.byteLength);
     new Uint8Array(imageBytes).set(png);
-    const { POST } = await import("@/app/api/uploads/route");
+    const { POST } = await import("@/app/api/uploads/images/route");
 
     const validBody = new FormData();
     validBody.append(
@@ -43,7 +43,7 @@ describe("streaming upload route", () => {
     );
     validBody.append("directPublish", "false");
     const accepted = await POST(
-      new Request("http://localhost/api/uploads", {
+      new Request("http://localhost/api/uploads/images", {
         method: "POST",
         body: validBody,
       }),
@@ -76,7 +76,7 @@ describe("streaming upload route", () => {
       new File([imageBytes], "two.png", { type: "image/png" }),
     );
     const rejected = await POST(
-      new Request("http://localhost/api/uploads", {
+      new Request("http://localhost/api/uploads/images", {
         method: "POST",
         body: invalidBody,
       }),
@@ -87,79 +87,56 @@ describe("streaming upload route", () => {
     });
   });
 
-  it("accepts one MP4 with sampled JPEG frames and rejects missing frames", async () => {
-    const { POST } = await import("@/app/api/uploads/route");
+  it("separates image and video uploads, with no client-provided frames", async () => {
+    const { POST: postImage } = await import("@/app/api/uploads/images/route");
+    const { POST: postVideo } = await import("@/app/api/uploads/videos/route");
     const mp4 = Buffer.from("\0\0\0\u0018ftypisom____avc1", "latin1");
-    const jpeg = await sharp({
-      create: {
-        width: 8,
-        height: 6,
-        channels: 3,
-        background: "#f59e0b",
-      },
-    })
-      .jpeg()
-      .toBuffer();
+    const png = await sharp({ create: { width: 3, height: 3, channels: 3, background: "#f59e0b" } }).png().toBuffer();
     const mp4Bytes = new ArrayBuffer(mp4.byteLength);
     new Uint8Array(mp4Bytes).set(mp4);
-    const jpegBytes = new ArrayBuffer(jpeg.byteLength);
-    new Uint8Array(jpegBytes).set(jpeg);
+    const imageBytes = new ArrayBuffer(png.byteLength);
+    new Uint8Array(imageBytes).set(png);
 
-    const validBody = new FormData();
-    validBody.append(
+    const imageWithFrameField = new FormData();
+    imageWithFrameField.append(
       "file",
-      new File([mp4Bytes], "clip.mp4", { type: "video/mp4" }),
+      new File([imageBytes], "image.png", { type: "image/png" }),
     );
-    validBody.append(
-      "frame",
-      new File([jpegBytes], "frame-01.jpg", { type: "image/jpeg" }),
-    );
-    validBody.append(
-      "frame",
-      new File([jpegBytes], "frame-02.jpg", { type: "image/jpeg" }),
-    );
-    validBody.append(
-      "frameMetadata",
-      JSON.stringify({ durationSeconds: 2, timestamps: [0.5, 1.5] }),
-    );
-    validBody.append("directPublish", "false");
-    const accepted = await POST(
-      new Request("http://localhost/api/uploads", {
+    imageWithFrameField.append("frameMetadata", "{}");
+    const imageRejected = await postImage(
+      new Request("http://localhost/api/uploads/images", {
         method: "POST",
-        body: validBody,
+        body: imageWithFrameField,
       }),
     );
-    expect(accepted.status).toBe(202);
-    const upload = (await accepted.json()) as { assetId: string };
-    const manifest = JSON.parse(
-      await fs.readFile(
-        path.join(
-          process.env.MEDIA_ROOT!,
-          upload.assetId,
-          "frames",
-          "manifest.json",
-        ),
-        "utf8",
-      ),
-    ) as { durationSeconds: number; frames: unknown[] };
-    expect(manifest).toMatchObject({ durationSeconds: 2 });
-    expect(manifest.frames).toHaveLength(2);
+    expect(imageRejected.status).toBe(400);
 
-    const missingFramesBody = new FormData();
-    missingFramesBody.append(
+    const videoWrongType = new FormData();
+    videoWrongType.append(
+      "file",
+      new File([imageBytes], "image.png", { type: "image/png" }),
+    );
+    const wrongTypeRejected = await postVideo(
+      new Request("http://localhost/api/uploads/videos", { method: "POST", body: videoWrongType }),
+    );
+    expect(wrongTypeRejected.status).toBe(400);
+    await expect(wrongTypeRejected.json()).resolves.toMatchObject({ error: { code: "unsupported_media_type" } });
+
+    const videoOnly = new FormData();
+    videoOnly.append(
       "file",
       new File([mp4Bytes], "missing.mp4", { type: "video/mp4" }),
     );
-    missingFramesBody.append("directPublish", "false");
-    const rejected = await POST(
-      new Request("http://localhost/api/uploads", {
+    const accepted = await postVideo(
+      new Request("http://localhost/api/uploads/videos", {
         method: "POST",
-        body: missingFramesBody,
+        body: videoOnly,
       }),
     );
-    expect(rejected.status).toBe(400);
-    await expect(rejected.json()).resolves.toMatchObject({
-      error: { code: "invalid_video_frames" },
+    expect(accepted.status).toBe(202);
+    await expect(accepted.json()).resolves.toMatchObject({
+      mediaType: "video",
+      processingStatus: "queued",
     });
   });
 });
