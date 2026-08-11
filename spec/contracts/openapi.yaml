@@ -1,0 +1,209 @@
+openapi: 3.1.0
+info:
+  title: 多模态素材库 API
+  version: 1.0.0
+paths:
+  /api/uploads/images:
+    post:
+      summary: 上传单张图片
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                directPublish: { type: boolean }
+      responses:
+        "202":
+          description: 上传已接收，等待后台处理
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UploadStatus" }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/uploads/videos:
+    post:
+      summary: 上传 H.264 MP4 视频并异步校验、提取关键帧
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                directPublish: { type: boolean }
+      responses:
+        "202":
+          description: 视频已落盘入队；worker 将校验内容并在服务端提取关键帧
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UploadStatus" }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/uploads/{uploadId}:
+    get:
+      summary: 查询上传与处理状态
+      parameters:
+        - { name: uploadId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: 当前处理状态
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UploadStatus" }
+  /api/assets:
+    get:
+      summary: 分页查询未删除的素材及其处理、审核状态
+      parameters:
+        - { name: view, in: query, description: pending 返回待审核素材，published 返回已入库素材, schema: { type: string, enum: [pending, published], default: published } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 8 } }
+        - { name: tag, in: query, description: 仅在 published 视图生效；执行标签模糊匹配，并在启用 Chroma 时合并分析结果的语义召回, schema: { type: string, maxLength: 128 } }
+      responses:
+        "200":
+          description: 带分页信息的素材列表
+  /api/search:
+    post:
+      summary: 按描述语义检索已入库素材
+      description: 可先用关键词按标签模糊匹配规则粗筛候选，再由 Chroma 对分析结果进行向量检索。默认返回相似度最高的 5 个素材。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DescriptionSearch" }
+      responses:
+        "200":
+          description: 按相似度排序的素材列表
+        "400": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/assets/{assetId}:
+    parameters:
+      - { name: assetId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: 获取素材完整详情与分析结果
+      responses:
+        "200": { description: 素材详情 }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: 整体更新素材名称、描述和标签
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssetEdit" }
+      responses:
+        "200": { description: 更新后的素材详情 }
+    delete:
+      summary: 软删除素材并异步清理媒体文件
+      responses:
+        "204": { description: 已删除 }
+  /api/assets/{assetId}/publish:
+    post:
+      summary: 将已完成分析的素材正式入库
+      parameters:
+        - { name: assetId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: 已入库的素材详情 }
+  /api/assets/{assetId}/retry:
+    post:
+      summary: 将处理失败的素材重新加入分析队列
+      parameters:
+        - { name: assetId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "202": { description: 已重新入队的处理状态 }
+  /api/media/{assetId}:
+    get:
+      summary: 以支持 Range 的方式流式返回原始媒体
+      parameters:
+        - { name: assetId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: download, in: query, description: 设为 1 时，以原始文件名作为附件下载, schema: { type: string, enum: ["1"] } }
+      responses:
+        "200": { description: 完整媒体内容 }
+        "206": { description: Range 请求的部分媒体内容 }
+components:
+  responses:
+    Error:
+      description: 统一错误响应
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: object
+                required: [code, message]
+                properties:
+                  code: { $ref: "#/components/schemas/FailureCode" }
+                  message: { type: string }
+  schemas:
+    FailureCode:
+      type: string
+      enum:
+        - invalid_request
+        - multiple_files
+        - unsupported_media_type
+        - file_too_large
+        - corrupt_file
+        - unsupported_video_codec
+        - invalid_video_frames
+        - model_not_configured
+        - model_video_unsupported
+        - video_frames_missing
+        - model_request_failed
+        - model_response_invalid
+        - storage_error
+        - internal_error
+    UploadStatus:
+      type: object
+      required: [uploadId, assetId, mediaType, processingStatus, reviewStatus, progressPercent, failureCode, failureMessage]
+      properties:
+        uploadId: { type: string, format: uuid }
+        assetId: { type: string, format: uuid }
+        mediaType: { type: string, enum: [image, video] }
+        processingStatus: { type: string, enum: [queued, validating, analyzing, completed, failed] }
+        reviewStatus: { type: string, enum: [pending_review, published, deleted] }
+        progressPercent: { type: integer, minimum: 0, maximum: 100 }
+        failureCode:
+          anyOf:
+            - { $ref: "#/components/schemas/FailureCode" }
+            - { type: "null" }
+        failureMessage: { type: [string, "null"] }
+    AssetEdit:
+      type: object
+      required: [name, description, tags]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+        description: { type: string, maxLength: 10000 }
+        tags:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required: [category, value]
+            properties:
+              category: { type: string, minLength: 1, maxLength: 64 }
+              value: { type: string, minLength: 1, maxLength: 128 }
+    DescriptionSearch:
+      type: object
+      required: [description]
+      properties:
+        description:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: 用于语义匹配的自然语言描述
+        keywords:
+          type: array
+          maxItems: 10
+          description: 可选的标签粗筛关键词；每个关键词必须按标签模糊匹配规则命中同一素材
+          items: { type: string, minLength: 1, maxLength: 64 }
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 5
+          description: 返回的最大素材数量

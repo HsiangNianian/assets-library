@@ -1,0 +1,37 @@
+x-app: &app
+  build:
+    context: .
+    network: host
+  env_file:
+    - .env
+  # This host runs Docker without veth support. The services share only
+  # persistent files, so they do not require an isolated bridge network.
+  network_mode: host
+  volumes:
+    - assets-library-data:/app/data
+    - assets-library-media:/app/media
+
+services:
+  web:
+    <<: *app
+    restart: unless-stopped
+
+  worker:
+    <<: *app
+    command: pnpm start:worker
+    restart: unless-stopped
+
+  chroma:
+    image: chromadb/chroma:latest
+    network_mode: host
+    environment:
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /data
+    volumes:
+      - assets-library-chroma:/data
+    restart: unless-stopped
+
+volumes:
+  assets-library-data:
+  assets-library-media:
+  assets-library-chroma:

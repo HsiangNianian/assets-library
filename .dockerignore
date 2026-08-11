@@ -1,0 +1,23 @@
+# Dependencies and generated output are installed/built inside Docker.
+node_modules
+.next
+.pnpm-store
+tsconfig.tsbuildinfo
+
+# Never bake local configuration, persisted data, or user uploads into images.
+.env
+.env.*
+!.env.example
+data
+media
+
+# Tooling and repository metadata are not needed for the image build.
+.git
+.code-review-graph
+.agents
+.codex
+coverage
+playwright-report
+test-results
+*.log
+compose.override.yaml
