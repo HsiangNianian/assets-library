@@ -1,8 +1,9 @@
-name: Publish PR image
+name: Publish tagged image
 
 on:
-  pull_request:
-    types: [opened, reopened, synchronize]
+  push:
+    tags:
+      - "*"
 
 permissions:
   contents: read
@@ -13,14 +14,12 @@ env:
 
 jobs:
   build-and-publish:
-    name: Build and publish PR image
+    name: Build and publish tagged image
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out pull request head
+      - name: Check out tag
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Set up QEMU for ARM builds
         uses: docker/setup-qemu-action@v3
@@ -30,9 +29,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Fork pull requests must not receive a token that can publish packages.
       - name: Log in to GitHub Container Registry
-        if: github.event.pull_request.head.repo.full_name == github.repository
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -45,7 +42,7 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=pr
+            type=ref,event=tag
             type=sha,format=short,prefix=sha-
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -54,7 +51,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
           platforms: linux/amd64,linux/arm64
