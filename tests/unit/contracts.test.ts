@@ -3,7 +3,9 @@ import {
   assetEditSchema,
   descriptionSearchSchema,
   imageAnalysisSchema,
-  uploadStatusSchema,
+  mediaTypeSchema,
+  userMediaListResponseSchema,
+  userStorageUsageResponseSchema,
   videoAnalysisSchema,
 } from "@/shared/contracts";
 
@@ -26,18 +28,7 @@ describe("shared contracts", () => {
   });
 
   it("rejects audio and malformed video timestamps", () => {
-    expect(() =>
-      uploadStatusSchema.parse({
-        uploadId: crypto.randomUUID(),
-        assetId: crypto.randomUUID(),
-        mediaType: "audio",
-        processingStatus: "queued",
-        reviewStatus: "pending_review",
-        progressPercent: 10,
-        failureCode: null,
-        failureMessage: null,
-      }),
-    ).toThrow();
+    expect(() => mediaTypeSchema.parse("audio")).toThrow();
     expect(() =>
       videoAnalysisSchema.parse({
         kind: "video",
@@ -73,5 +64,46 @@ describe("shared contracts", () => {
       limit: 5,
     });
     expect(() => descriptionSearchSchema.parse({ description: "x", limit: 21 })).toThrow();
+  });
+
+  it("validates user storage totals and discriminated media links", () => {
+    expect(
+      userStorageUsageResponseSchema.parse({
+        user_id: "user-7",
+        total_files: 1,
+        image_files: 0,
+        video_files: 1,
+        total_bytes: 15,
+        image_bytes: 0,
+        video_bytes: 15,
+        items: [
+          {
+            asset_id: "00000000-0000-4000-8000-000000000003",
+            name: "clip",
+            media_type: "video",
+            media_bytes: 12,
+            thumbnail_bytes: 3,
+            total_bytes: 15,
+          },
+        ],
+      }),
+    ).toBeTruthy();
+    expect(() =>
+      userMediaListResponseSchema.parse({
+        user_id: "user-7",
+        items: [
+          {
+            asset_id: "00000000-0000-4000-8000-000000000003",
+            name: "clip",
+            media_type: "video",
+            size_bytes: 12,
+            media_url: "https://example.test/video",
+            created_at: "2026-08-12T12:00:00+08:00",
+          },
+        ],
+        next_cursor: null,
+        has_more: false,
+      }),
+    ).toThrow(/thumbnail/);
   });
 });

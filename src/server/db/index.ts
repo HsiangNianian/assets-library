@@ -1,3 +1,3 @@
 import { getDatabase } from "./singleton";
 
-export const { sqlite, db } = getDatabase();
+export const { pool, db } = getDatabase();

@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 type ThemeMode = "light" | "dark" | "system";
 
 const options: Array<{ mode: ThemeMode; label: string; Icon: typeof Sun }> = [
-  { mode: "light", label: "亮色", Icon: Sun },
+  { mode: "light", label: "浅色", Icon: Sun },
   { mode: "dark", label: "暗色", Icon: Moon },
   { mode: "system", label: "跟随系统", Icon: Monitor },
 ];
@@ -70,6 +70,7 @@ export function ThemeToggle() {
                   : "text-slate-600 hover:bg-black/[0.05] dark:text-slate-200 dark:hover:bg-white/[0.10]"
               }`}
               onClick={() => selectTheme(optionMode)}
+              aria-pressed={mode === optionMode}
             >
               <Icon className="size-3.5" />
               {label}

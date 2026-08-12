@@ -11,6 +11,7 @@ const config = [
   {
     ignores: [
       ".next/**",
+      ".next-e2e/**",
       "node_modules/**",
       "coverage/**",
       "playwright-report/**",

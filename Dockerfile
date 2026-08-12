@@ -20,7 +20,7 @@ FROM base AS dependencies
 ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
 ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 
-# Native dependencies such as better-sqlite3 and sharp may need to compile.
+# Native dependencies such as sharp may need to compile.
 # The slim base image has no system CA bundle yet. Debian repository metadata
 # remains signature-verified while the initial packages install ca-certificates.
 RUN sed -i \
@@ -49,8 +49,7 @@ ENV HOME=/home/node
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
-# These paths are deliberately inside mounted, persistent directories.
-ENV DATABASE_PATH=/app/data/assets.db
+# 媒体暂存目录位于持久化卷；关系数据使用 DATABASE_URL 指向外部 MySQL。
 ENV MEDIA_ROOT=/app/media
 
 WORKDIR /app
