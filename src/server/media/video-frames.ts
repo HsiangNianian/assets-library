@@ -1,19 +1,19 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { AppError } from "@/server/errors";
+import { runMediaCommand } from "./ffmpeg";
 import { temporaryUploadPath } from "./storage";
 import { MAX_VIDEO_FRAMES, videoFrameTimestamps, type VideoFrameUploadMetadata } from "@/shared/video-frames";
 
-const execFileAsync = promisify(execFile);
-
-async function run(command: string, args: string[]) {
-  try {
-    return await execFileAsync(command, args, { timeout: 60_000, maxBuffer: 1024 * 1024 });
-  } catch {
-    throw new AppError("invalid_video_frames", "服务端无法提取视频关键帧，请确认视频可正常播放。");
-  }
+async function run(command: "ffmpeg" | "ffprobe", args: string[]) {
+  return runMediaCommand(
+    command,
+    args,
+    new AppError(
+      "invalid_video_frames",
+      "服务端无法提取视频关键帧，请确认视频可正常播放。",
+    ),
+  );
 }
 
 export async function extractVideoFrames(inputPath: string): Promise<{
@@ -33,9 +33,9 @@ export async function extractVideoFrames(inputPath: string): Promise<{
   try {
     for (const timestampSeconds of timestamps) {
       const temporaryPath = temporaryUploadPath(crypto.randomUUID());
+      uploads.push({ temporaryPath, timestampSeconds });
       await run("ffmpeg", ["-v", "error", "-ss", String(timestampSeconds), "-i", inputPath, "-frames:v", "1", "-q:v", "2", "-f", "image2", "-y", temporaryPath]);
       if (!fs.existsSync(temporaryPath) || fs.statSync(temporaryPath).size === 0) throw new AppError("invalid_video_frames");
-      uploads.push({ temporaryPath, timestampSeconds });
     }
     return { uploads, metadata: { durationSeconds, timestamps } };
   } catch (error) {

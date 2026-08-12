@@ -46,12 +46,9 @@ describe("complete asset processing flow", () => {
     })
       .png()
       .toFile(temporaryPath);
-    const stat = await fs.stat(temporaryPath);
     const validated = await validation.validateMediaFile(
       temporaryPath,
       "campaign.png",
-      "image/png",
-      stat.size,
     );
     const assetId = crypto.randomUUID();
     const uploadId = crypto.randomUUID();
@@ -69,7 +66,7 @@ describe("complete asset processing flow", () => {
       mimeType: validated.mimeType,
       declaredMime: "image/png",
       mediaType: "image",
-      sizeBytes: stat.size,
+      sizeBytes: validated.sizeBytes,
       directPublish: false,
     });
     expect((await repository.listAssets({ view: "pending" })).items).toEqual([
@@ -283,9 +280,15 @@ describe("complete asset processing flow", () => {
 
     const job = repository.claimNextJob();
     expect(job?.assetId).toBe(assetId);
-    await processing.processJob(job!, analyzer, async () => ({
-      mimeType: "video/mp4",
-    }));
+    await processing.processJob(
+      job!,
+      analyzer,
+      async () => ({
+        mimeType: "video/mp4",
+        sizeBytes: 5,
+      }),
+      async () => undefined,
+    );
 
     const detail = repository.getAssetDetail(assetId);
     expect(detail.analysis).toMatchObject({

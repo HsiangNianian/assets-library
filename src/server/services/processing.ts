@@ -38,30 +38,41 @@ import {
 } from "@/shared/contracts";
 
 type AssetRecord = NonNullable<ReturnType<typeof getAssetRecord>>;
-type MediaPreparer = (asset: AssetRecord) => Promise<{ mimeType: string }>;
+type MediaPreparer = (
+  asset: AssetRecord,
+) => Promise<{ mimeType: string; sizeBytes: number }>;
+type VideoFramePreparer = (asset: AssetRecord) => Promise<void>;
 
 async function prepareMedia(asset: AssetRecord) {
   const validated = await validateMediaFile(
     resolveMediaPath(asset.originalPath),
     asset.originalFilename,
-    asset.mimeType,
-    asset.sizeBytes,
   );
   if (validated.mediaType !== asset.mediaType) {
     throw new AppError("unsupported_media_type");
   }
-  if (validated.mediaType === "video") {
-    try {
-      readVideoFrames(asset.originalPath);
-    } catch (error) {
-      if (!(error instanceof AppError) || error.code !== "video_frames_missing") {
-        throw error;
-      }
-      const extracted = await extractVideoFrames(resolveMediaPath(asset.originalPath));
-      storeVideoFrames(asset.originalPath, extracted.uploads, extracted.metadata);
+  return {
+    mimeType: validated.mimeType,
+    sizeBytes: validated.sizeBytes,
+  };
+}
+
+async function prepareVideoFrames(asset: AssetRecord) {
+  try {
+    readVideoFrames(asset.originalPath);
+  } catch (error) {
+    if (!(error instanceof AppError) || error.code !== "video_frames_missing") {
+      throw error;
     }
+    const extracted = await extractVideoFrames(
+      resolveMediaPath(asset.originalPath),
+    );
+    storeVideoFrames(
+      asset.originalPath,
+      extracted.uploads,
+      extracted.metadata,
+    );
   }
-  return { mimeType: validated.mimeType };
 }
 
 function normalize(value: string) {
@@ -273,6 +284,7 @@ export async function processJob(
   job: ClaimedJob,
   analyzer: MultimodalAnalyzer = new OpenAICompatibleAnalyzer(),
   mediaPreparer: MediaPreparer = prepareMedia,
+  videoFramePreparer: VideoFramePreparer = prepareVideoFrames,
 ) {
   const asset = getAssetRecord(job.assetId);
   if (!asset) {
@@ -318,9 +330,16 @@ export async function processJob(
     }
     const prepared = await mediaPreparer(asset);
     db.update(assets)
-      .set({ mimeType: prepared.mimeType, updatedAt: new Date() })
+      .set({
+        mimeType: prepared.mimeType,
+        sizeBytes: prepared.sizeBytes,
+        updatedAt: new Date(),
+      })
       .where(eq(assets.id, asset.id))
       .run();
+    if (asset.mediaType === "video") {
+      await videoFramePreparer(asset);
+    }
     if (!advanceJobAssetStatus(job, "analyzing")) {
       completeJob(job);
       return;

@@ -4,10 +4,39 @@ import { AppError } from "@/server/errors";
 import { resolveMediaPath } from "@/server/media/storage";
 import { getAssetRecord } from "@/server/repositories/assets";
 
+const mediaReadyFailureCodes = new Set([
+  "invalid_video_frames",
+  "model_not_configured",
+  "model_video_unsupported",
+  "video_frames_missing",
+  "model_request_failed",
+  "model_response_invalid",
+]);
+
+function mediaIsReady(asset: NonNullable<ReturnType<typeof getAssetRecord>>) {
+  if (
+    asset.processingStatus === "analyzing" ||
+    asset.processingStatus === "completed"
+  ) {
+    return true;
+  }
+  return (
+    asset.processingStatus === "failed" &&
+    Boolean(asset.failureCode && mediaReadyFailureCodes.has(asset.failureCode))
+  );
+}
+
 export function mediaResponse(assetId: string, request: Request) {
   const asset = getAssetRecord(assetId);
   if (!asset || asset.reviewStatus === "deleted") {
     throw new AppError("invalid_request", "素材不存在。", 404);
+  }
+  if (!mediaIsReady(asset)) {
+    throw new AppError(
+      "invalid_request",
+      "素材完成校验和分析后才可预览或下载。",
+      409,
+    );
   }
   const filePath = resolveMediaPath(asset.originalPath);
   if (!fs.existsSync(filePath)) {

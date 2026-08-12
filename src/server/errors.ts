@@ -4,10 +4,11 @@ import { ZodError } from "zod";
 const messages: Record<FailureCode, string> = {
   invalid_request: "上传请求无效，请重新选择文件。",
   multiple_files: "单次只能上传一个文件。",
-  unsupported_media_type: "仅支持 JPEG、PNG、WebP 图片和 H.264 MP4 视频。",
+  unsupported_media_type:
+    "图片目标格式仅支持 JPEG、PNG、WebP，视频目标格式仅支持 MP4。",
   file_too_large: "文件超过对应类型的大小限制。",
   corrupt_file: "文件已损坏或无法读取，请更换文件。",
-  unsupported_video_codec: "MP4 视频必须使用 H.264 编码。",
+  unsupported_video_codec: "视频编码不受支持，且无法转换为 H.264。",
   invalid_video_frames: "视频关键帧无效或不完整，请重新选择视频上传。",
   model_not_configured: "模型服务尚未配置，请联系管理员。",
   model_video_unsupported:
