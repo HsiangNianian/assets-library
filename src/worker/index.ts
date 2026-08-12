@@ -4,6 +4,7 @@ import {
   requeueFailedEmbeddingJobs,
 } from "@/server/repositories/assets";
 import { loadConfig } from "@/server/config";
+import { OpenAICompatibleAnalyzer } from "@/server/model/analyzer";
 import { processJob } from "@/server/services/processing";
 
 const pollIntervalMs = 1_000;
@@ -19,6 +20,7 @@ process.on("SIGTERM", () => {
 
 async function main() {
   const config = loadConfig();
+  const analyzer = new OpenAICompatibleAnalyzer(config);
   recoverStaleJobs();
   const requeuedEmbeddings = requeueFailedEmbeddingJobs();
   if (requeuedEmbeddings > 0) {
@@ -30,19 +32,19 @@ async function main() {
       console.log(`Recovered ${recovered} stale processing job(s).`);
     }
   }, recoveryIntervalMs);
-  const vlmName = config.models.vlm.configured
-    ? config.models.vlm.name
-    : "not configured";
-  const llmName = config.models.llm.configured
-    ? config.models.llm.name
-    : "not configured";
+  const vlmChain =
+    config.models.vlmCandidates.map((model) => model.name).join(" -> ") ||
+    "not configured";
+  const llmChain =
+    config.models.llmCandidates.map((model) => model.name).join(" -> ") ||
+    "not configured";
   console.log(
-    `Asset processing worker started (VLM: ${vlmName}, LLM: ${llmName}, VLM protocol: ${config.models.vlm.protocol}).`,
+    `Asset processing worker started (VLM chain: ${vlmChain}, LLM chain: ${llmChain}, VLM protocol: ${config.models.vlm.protocol}).`,
   );
   while (!stopping) {
     const job = claimNextJob();
     if (job) {
-      await processJob(job);
+      await processJob(job, analyzer);
       continue;
     }
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
