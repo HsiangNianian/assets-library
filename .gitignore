@@ -76,6 +76,7 @@ web_modules/
 
 # Next.js build output
 .next
+.next-e2e
 out
 
 # Nuxt.js build / generate output
@@ -146,6 +147,7 @@ vite.config.ts.timestamp-*
 /data/
 /media/
 /chroma-data/
+/.run/
 /playwright-report/
 /test-results/
 

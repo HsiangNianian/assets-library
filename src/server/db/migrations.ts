@@ -1,36 +1,34 @@
 import path from "node:path";
-import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import { migrate } from "drizzle-orm/mysql2/migrator";
 import {
+  closeDatabase,
+  inspectDatabaseConnection,
   openDatabase,
   type DatabaseConnection,
+  type DatabaseOptions,
 } from "@/server/db/connection";
 
-export const defaultMigrationsFolder = path.resolve(
-  process.cwd(),
-  "drizzle",
-);
+export const defaultMigrationsFolder = path.resolve(process.cwd(), "drizzle");
 
-export function migrateDatabase(
+/** MySQL 迁移必须显式 await，避免 Web/worker 在 DDL 尚未完成时启动。 */
+export async function migrateDatabase(
   connection: DatabaseConnection,
   migrationsFolder = defaultMigrationsFolder,
 ) {
-  migrate(connection.db, { migrationsFolder });
+  await migrate(connection.db, { migrationsFolder });
 }
 
-export function initializeDatabase(
-  databasePath: string,
+export async function initializeDatabase(
+  options: DatabaseOptions,
   migrationsFolder = defaultMigrationsFolder,
 ) {
-  const connection = openDatabase(databasePath);
+  const connection = openDatabase(options);
   try {
-    // This is the only place that changes the database-wide journal mode.
-    // Docker runs it under flock before starting either the web server or the
-    // worker, so concurrent service startup cannot race this PRAGMA.
-    connection.sqlite.pragma("journal_mode = WAL");
-    migrateDatabase(connection, migrationsFolder);
+    await inspectDatabaseConnection(connection.pool);
+    await migrateDatabase(connection, migrationsFolder);
     return connection;
   } catch (error) {
-    connection.sqlite.close();
+    await closeDatabase(connection);
     throw error;
   }
 }

@@ -7,9 +7,9 @@
 | 应用 | Next.js App Router、React、TypeScript strict |
 | UI | Tailwind CSS、shadcn/ui 组件模式 |
 | 包管理 | pnpm |
-| 数据 | Drizzle ORM、better-sqlite3、SQLite WAL |
-| 媒体 | worker 使用 Sharp/FFmpeg 按目标扩展名正规化媒体并提取视频关键帧；本地文件系统保存正规化文件和帧 |
-| 后台任务 | 独立 TypeScript worker 事务轮询 SQLite |
+| 数据 | Drizzle ORM、MySQL 8（TLS、UTC、连接池） |
+| 媒体 | worker 使用 Sharp/FFmpeg 正规化；视频经分镜服务切片；长期对象保存到私有 ZOS |
+| 后台任务 | 独立 TypeScript worker 使用 MySQL 持久任务与行锁抢占 |
 | 模型 | OpenAI Chat Completions / Responses 兼容 HTTP 适配器 |
 | 校验 | Zod、文件签名、Sharp 图片解码、ffprobe 容器探测、FFmpeg 完整视频解码与输出复验 |
 | 测试 | Vitest、Playwright、模型 HTTP 测试替身 |
@@ -33,10 +33,10 @@ src/
 ## 数据流
 
 ```text
-浏览器通过 XHR multipart 流式上传单个原文件
-  → 目标扩展名/大小检查（声明 MIME 仅审计）→ 临时文件 → 原子移动
-  → SQLite 素材与任务 → 独立 worker
-  → 内容校验与目标格式原子转换；视频按分位点提取 1–5 帧 → 模型分析
+浏览器创建一个上传任务并逐项 PUT 字节流，最后封存任务
+  → media/.staging 临时文件 → MySQL 持久任务 → 独立 worker
+  → 图片正规化；父视频分镜并整批验证每个切片不超过 10 MiB
+  → ZOS + MySQL 全有或全无持久化；每个子视频提取 1–5 帧 → 独立模型分析
   → 当前候选重试/Zod 校验一次修正 → 按顺序切换 VLM 候选
   → 保存实际成功模型 → 待审核或直接入库
   → 概览、详情、编辑、发布、重试、删除
@@ -52,10 +52,10 @@ VLM 由 `VLM_NAME` 和按优先级排列的 `VLM_FALLBACK_NAMES` 组成候选链
 
 ## 运行边界
 
-- Web 与 worker 是同一仓库的两个长期 Node 进程，共享数据库和媒体目录。
-- worker 每 30 秒更新运行任务心跳并扫描失联任务；超过两分钟没有心跳的任务重新排队。
-- 不依赖 Redis、消息队列或对象存储；视频抽帧需要服务端 FFmpeg/ffprobe。
-- worker 将媒体转换为文件名扩展名指定的受支持格式；视频统一为 H.264/yuv420p MP4，并只分析画面、不分析音轨。
-- 关键帧保存在素材 UUID 目录中，分析重试复用原帧，清理任务删除整个素材目录。
-- 删除先软删除，再由 worker 清理素材目录。
+- Web 与 worker 是同一仓库的两个长期 Node 进程，共享远程 MySQL、Chroma 和 ZOS。
+- worker 使用 MySQL `FOR UPDATE SKIP LOCKED` 抢占持久任务，并在启动及周期任务中恢复状态。
+- 不依赖 Redis；分镜服务与应用部署在同一台素材库服务器，只监听回环地址。
+- worker 将图片转换为目标扩展名格式；视频切片统一为 H.264/yuv420p MP4，只分析画面、不分析音轨。
+- 原始上传只在本地 staging 保留 24 小时；成功持久化后立即清理，终态任务记录保留 7 天。
+- 个人素材删除会释放为公共素材；公共素材删除由异步任务清理 MySQL、ZOS 与 Chroma。
 - 模型密钥及原始模型响应不得写入日志或数据库。

@@ -1,304 +1,209 @@
 # 素材中枢
 
-一个基于 Next.js、TypeScript、Tailwind CSS、shadcn/ui、SQLite 和本地文件系统的单机多模态素材库 MVP。
+面向内部业务的多模态素材库。项目使用 Next.js 15、TypeScript、MySQL、
+Chroma、电信云 ZOS 和独立分镜服务，提供图片与视频上传、视觉模型分析、
+标签管理、语义检索及用户/公共素材管理。
 
-第一阶段支持一次选择多个本地素材，浏览器会将每个素材作为独立请求逐个上传：
+## 当前架构
 
-- 目标扩展名为 JPEG、PNG、WebP 的图片，默认最大 20 MB
-- 目标扩展名为 MP4 的本地视频，默认最大 200 MB
+- Web 与 worker 共用远程 MySQL；数据库会话统一使用 UTC，API 时间统一返回
+  ISO 8601 上海时区（`+08:00`）。
+- 上传文件先流式写入 `MEDIA_ROOT/.staging`，不在进程内长期缓存完整文件或分析结果。
+- 图片按文件名扩展名正规化为 JPEG、PNG 或 WebP，再持久化到私有 ZOS。
+- 完整视频先正规化为 H.264/yuv420p MP4，再交给同机
+  `scene-detect-service` 分镜。父视频仅作为内部来源保存，素材库对外只暴露子视频。
+- 父视频及全部子视频通过 ZOS 补偿事务和单个 MySQL 事务整批持久化。任一切片损坏、
+  下载不完整或超过 10 MiB 时，整批不入库。
+- 整批持久化成功后，每个子视频独立提取 1–5 张关键帧并进入现有 VLM 分析流程。
+- 语义向量保存到 Chroma；关系数据、任务状态和分析结果保存到 MySQL。
+- 所有业务 API 使用 `/api/v1` 和 `snake_case`。项目部署于可信内网，接口不做
+  API Key 或登录鉴权；素材可见范围仍由 `user_id` 规则约束。
 
-文件扩展名决定最终存储格式，浏览器声明的 MIME 只保留作审计。worker 会先验证真实内容：JPEG、PNG、WebP 图片在内容与扩展名不一致时由 Sharp 转换为扩展名对应的格式；常见自包含视频容器在文件名为 `.mp4` 时由 FFmpeg 归一化为 H.264/yuv420p MP4。无法解码、转换不完整或超限的素材会标记失败，并在上传页直接显示原因。视频随后提取少量 JPEG 关键帧供视觉分析；音频分析、URL 上传和批量编辑不在本阶段范围内。
+## 环境要求
 
-## 本地运行
+- Linux
+- Node.js 22+
+- pnpm 11.3+
+- FFmpeg / ffprobe
+- `uv` / `uvx`
+- 可访问的 MySQL 8.4、私有 ZOS、VLM/embedding 服务
+- 与本仓库同级的 `scene-detect-service` 仓库，或通过
+  `SCENE_DETECT_PROJECT_DIR` 指向它
 
-环境要求：Node.js 22+、npm、FFmpeg/ffprobe。首次运行：
+初始化：
 
 ```bash
-npm install
+corepack enable
+pnpm install --frozen-lockfile
 cp .env.example .env
-npm run db:migrate
 ```
 
-如需语义搜索，先在终端 1 启动本地 Chroma（需要安装 `uv`）：
+真实连接串、模型令牌和 ZOS 密钥只能写在未提交的 `.env` 或部署平台的
+Secret 中，不能写入 README、Compose、镜像或 Git 历史。
+
+## 一键启动与停止
+
+本地及同机部署的标准入口是：
 
 ```bash
-uvx --from chromadb chroma run \
-  --path ./chroma-data \
-  --host 127.0.0.1 \
-  --port 8100
+./scripts/start.sh
+./scripts/stop.sh
 ```
 
-同时将 `.env` 配置为 `CHROMA_URL=http://127.0.0.1:8100`。不需要语义搜索时，可将 `EMBEDDING_MODEL` 留空并跳过此终端。
+`start.sh` 会依次执行：
 
-在终端 2 启动 Web 和 worker：
+1. 固定版本启动本地 Chroma，并等待 heartbeat；
+2. 从 `SCENE_DETECT_PROJECT_DIR` 启动仅监听 `127.0.0.1` 的分镜服务；
+3. 通过 Drizzle 的数据库迁移账本幂等执行 MySQL migration；
+4. 启动 Next.js Web 与 worker，并等待 Web 健康检查。
 
-```bash
-npm run dev
-```
+任一依赖提前退出或超时，脚本会显示对应日志末尾、清理 PID 并返回非零状态，
+不会误报“全部就绪”。运行日志位于 `.run/`。
 
-开发命令同时启动 Next.js Web 与后台 worker，并监听源码变化自动重载。打开 <http://localhost:3000>。若 3000 端口已占用：
+`APP_MODE=dev` 使用 Turbopack 开发模式；`APP_MODE=prd` 使用构建产物。应用监听地址
+由 `PORT` 控制。服务监听可以使用 `0.0.0.0`，但同机客户端连接地址应使用
+`127.0.0.1`，不能把 `0.0.0.0` 当作目标地址。
 
-```bash
-PORT=3100 npm run dev
-```
+浏览器打开应用即可使用，无登录页。服务间调用 `/api/v1` 也不需要鉴权 Header；
+因此部署边界必须由可信内网、反向代理或防火墙保证，不能直接暴露到公网。
 
-接口调用说明见 [API 文档](docs/api.md)，机器可读的接口草案见
-[OpenAPI 文件](spec/contracts/openapi.yaml)，浏览器 Swagger UI 位于 `/api-docs`。
+## 关键配置
 
-数据库结构以 `src/server/db/schema.ts` 为来源，由 Drizzle migration
-负责创建和升级。Web 与 worker 只打开、配置并复用数据库连接，不会在启动时隐式建表；
-首次运行或拉取包含新迁移的代码后，需要先执行 `npm run db:migrate`。
-
-## 模型配置
-
-当前图片和视频关键帧分析属于 VLM（视觉语言模型）任务。设置 `VLM_PROTOCOL` 为：
-
-- `openai_chat_completions`
-- `openai_responses`
-
-并配置 `VLM_BASE_URL` 和 `VLM_NAME`。兼容 NewAPI、百炼等第三方服务时使用其 OpenAI
-兼容 Base URL（通常以 `/v1` 结尾）。`VLM_API_KEY` 是可选的：网关启用鉴权时填写
-NewAPI 令牌，网关关闭鉴权时可以留空；留空后请求不会发送 `Authorization` 请求头。
-
-`qwen3.7` 系列默认开启思考模式。素材结构化提取不需要长推理，建议关闭以降低等待时间：
+完整模板见 [.env.example](.env.example)。主要配置包括：
 
 ```dotenv
-VLM_NAME=qwen3.7-plus
-VLM_FALLBACK_NAMES=kimi-k2.5,Qwythos
+DATABASE_URL=mysql://<user>:<url-encoded-password>@<host>:<port>/<database>
+DATABASE_SSL_CA_PATH=./data/mysql-ca.pem
+DATABASE_POOL_SIZE=20
+MEDIA_ROOT=./media
+UPLOAD_MAX_ITEMS=100
+UPLOAD_MAX_TOTAL_BYTES=2147483648
+STAGING_RETENTION_HOURS=24
+TASK_RETENTION_DAYS=7
+CLEANUP_INTERVAL_SECONDS=3600
+
+SCENE_DETECT_ENABLED=true
+SCENE_DETECT_BASE_URL=http://127.0.0.1:28200
+SCENE_DETECT_PROJECT_DIR=../scene-detect-service
+SCENE_SEGMENT_MAX_BYTES=10485760
+
+ZOS_API_ENDPOINT=<s3-compatible-api-endpoint>
+ZOS_BUCKET=<private-bucket>
+ZOS_ACCESS_KEY_ID=<secret>
+ZOS_SECRET_ACCESS_KEY=<secret>
+```
+
+远程 MySQL 必须配置 CA。应用连接会验证证书链，禁用明文远程连接。数据库从空库
+开始时执行：
+
+```bash
+pnpm db:migrate
+```
+
+迁移由 MySQL 中的 Drizzle 迁移表判断，不使用本地 marker。数据库 schema 的唯一来源为
+[schema.ts](src/server/db/schema.ts)，迁移文件位于 `drizzle/`。
+
+## API v1
+
+完整请求/响应、字段类型和错误码见 [API 文档](docs/api.md)；机器可读规范见
+[OpenAPI](spec/contracts/openapi.yaml)，浏览器文档页位于 `/docs`；原 `/api-docs`
+入口继续保留。
+
+主要接口：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/api/v1/uploads` | 创建批量上传任务及 item 清单 |
+| `PUT` | `/api/v1/uploads/{task_id}/items/{item_id}` | 逐项流式上传 |
+| `POST` | `/api/v1/uploads/{task_id}` | 封存任务并启动验证、分镜、持久化和分析 |
+| `GET` | `/api/v1/tasks/{task_id}` | 查询上传及所有异步变更任务 |
+| `POST` | `/api/v1/assets/query` | 统一浏览、标签过滤与语义搜索 |
+| `GET` | `/api/v1/assets/{asset_id}` | 获取素材详情 |
+| `PATCH` | `/api/v1/assets/{asset_id}` | 异步修改素材 |
+| `POST` | `/api/v1/assets/{asset_id}/publish` | 异步发布素材 |
+| `POST` | `/api/v1/assets/{asset_id}/retry` | 异步重试失败分析 |
+| `DELETE` | `/api/v1/assets/{asset_id}` | 异步释放个人素材或删除公共素材 |
+| `GET` | `/api/v1/media/{asset_id}` | 私有媒体流、下载和 HTTP Range |
+
+上传任务默认最多 100 个文件、总计最多 2 GiB。创建任务后必须上传清单中的每一项，
+再调用封存接口；不存在“从任务中删除 item”的接口。上传中断会释放行级租约、清零该项
+进度并删除不完整临时文件，可以从头重传。相同 item 的并发 PUT 会返回 409。
+
+任务及 item 的 `status` 仅使用 `queued`、`running`、`done`、`failed`；详细阶段由
+`phase` 表达。创建任务时可选 `callback_url`。没有回调时按 `task_id` 轮询；有回调时
+服务会在终态发送与查询接口同结构的任务摘要，并记录、退避重试投递。回调目标属于内部
+可信配置，服务不会跟随 HTTP 重定向。
+
+## 用户与公共素材
+
+`assets.user_id IS NULL` 表示公共素材；非空表示对应用户的个人素材。`user_id` 是由上游
+系统提供的外部字符串，本项目当前不维护 users 表。
+
+- 查询不提供用户范围时只返回公共素材；`mode=user` 精确查询一个用户；`all` 和
+  `exclude_user` 必须显式请求。
+- 个人素材删除必须提供匹配的 `user_id`，操作只把 `user_id` 置空，使其转为公共素材，
+  不删除 ZOS 文件、向量或分析结果。
+- 不提供 `user_id` 的删除只针对公共素材，worker 会幂等清理 Chroma、ZOS 与 MySQL。
+- 视频切片可独立删除；同一父视频的最后一个切片删除后，父视频对象自动回收。
+
+本阶段是可信内网、无应用层鉴权模型。调用者可以声明任意 `user_id`，因此生产入口必须由
+内网网关或防火墙限制来源；若未来面向不可信客户端，必须从受信身份令牌派生 user_id。
+
+## 文件与任务生命周期
+
+- 未封存或失败的本地 staging 文件保留 24 小时，每小时扫描一次。
+- 成功写入 ZOS/MySQL 的本地 staging、分析下载文件和分镜工作区立即清理。
+- 任务终态记录默认保留 7 天；长期存在的父视频/素材引用会在任务清理时自动置空，
+  不会级联删除媒体。
+- 完整父视频、切片和图片长期保存于私有 ZOS；媒体 API 负责用户作用域、
+  `Content-Type`、下载文件名及 Range，不向客户端暴露对象存储密钥。
+
+## 模型与候选链
+
+图片以及子视频关键帧使用 VLM。配置主模型和有序候选：
+
+```dotenv
+VLM_PROTOCOL=openai_chat_completions
+VLM_BASE_URL=<openai-compatible-base-url>
+VLM_API_KEY=<secret>
+VLM_NAME=<primary-model-id>
+VLM_FALLBACK_NAMES=<fallback-id-1>,<fallback-id-2>
 VLM_ENABLE_THINKING=false
 ```
 
-`VLM_FALLBACK_NAMES` 是按优先级排列的逗号分隔候选列表。主模型额度耗尽、模型不存在或
-明确不支持视觉输入时，worker 会依次切换候选；网络错误、超时、普通限流和 5xx 会先按
-`VLM_RETRY_COUNT` 重试当前模型，仍失败后再切换。401/403 鉴权失败及普通请求参数错误不会
-继续尝试共享同一端点和密钥的候选。结构化响应无效时，每个候选会获得一次纠正机会。
+主模型与 fallback 合计最多 5 个，精确去重，并共享 protocol、Base URL 和 API Key。
+额度耗尽、模型不存在或明确不支持图片输入时会切换候选；网络、超时、普通限流和 5xx
+先按 `VLM_RETRY_COUNT` 重试。401/403 和普通请求参数错误会立即失败。成功结果保存实际
+使用的模型名与协议。LLM 组已独立配置，但当前业务尚未调用。
 
-同组候选共享 protocol、Base URL 和 API Key，模型名必须使用网关返回的精确 ID。主模型与
-fallback 合计最多 5 个，重复名称会在保留原顺序的前提下去除。显式设置的
-`VLM_ENABLE_THINKING` 会应用到整个候选链。失败候选会进入内存冷却，避免每个任务都重复
-请求已耗尽额度的模型：
+设置 `EMBEDDING_MODEL` 后启用 Chroma 语义索引。`POST /api/v1/assets/query` 会先在
+MySQL 中应用 user scope、媒体类型、状态、精确标签和关键词过滤，再用这些候选 ID 查询
+Chroma，防止越权召回。当前语义查询是单页 top-k，不接受 cursor。
 
-```dotenv
-VLM_FAILOVER_COOLDOWN_MS=1800000
-```
+## 测试与构建
 
-配额和模型能力错误使用上述冷却时长；短暂故障与无效响应最多冷却 60 秒。worker 重启后
-冷却状态会清空；若所有候选都在冷却，则探测最早到期的候选。分析成功后，数据库保存实际
-完成任务的候选模型名和协议，而不是固定记录主模型。
-
-`LLM_PROTOCOL`、`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_NAME`、
-`LLM_FALLBACK_NAMES` 和 `LLM_ENABLE_THINKING` 构成独立的纯文本模型配置。`LLM_BASE_URL` 和 `LLM_API_KEY`
-留空时复用 VLM 的端点与密钥；当前业务尚未调用 LLM。每个模型组独立决定是否发送
-`enable_thinking`，不会把 VLM 的扩展参数透传给 LLM。
+所有会修改数据库的集成测试只允许连接名称以 `_test` 结尾的专用 MySQL 数据库：
 
 ```dotenv
-LLM_NAME=Qwythos
-LLM_FALLBACK_NAMES=kimi-k2.5
-LLM_ENABLE_THINKING=false
+TEST_DATABASE_URL=mysql://<test-user>:<password>@<host>:<port>/assets_library_test
 ```
 
-`LLM_FALLBACK_NAMES` 已按与 VLM 相同的规则完成配置解析，供后续纯文本任务直接复用；由于
-当前没有 LLM 业务调用，本次不会宣称 LLM 自动切换已经被执行。
-
-视频分析使用 Chat Completions 的多图片输入。worker 先将需要转换的视频原子替换为真实 H.264 MP4，再按视频时长在服务端提取 1–5 张 JPEG 关键帧，并将关键帧及其时间点交给模型；归一化后的 MP4 用于存储、预览和下载。配置：
-
-```dotenv
-VLM_VIDEO_MODE=frames
-VLM_VIDEO_TIMEOUT_MS=300000
-```
-
-不超过 5 秒的视频每秒取一帧（向上取整，至少一帧），超过 5 秒的视频固定取五帧；时间点均为各等分区间的中点，因此长视频取 10%、30%、50%、70%、90% 位置。FFmpeg 以 JPEG 保存关键帧。视频大小不再影响模型传递策略，也不需要公网 URL。
-
-Responses 协议或禁用视频能力时，视频任务会明确失败为 `model_video_unsupported`。当前只分析画面，不处理音轨、ASR、语言或字幕。
-
-素材上传成功后会立即出现在概览中。排队、分析中和失败素材会显示状态；分析完成且待审核的素材可以在概览直接入库。关闭上传页只会停止该页面的状态轮询，不会取消已经入队的后台任务。详情页预览和下载的是正规化后的媒体内容，并保留用户上传时的文件名。
-
-概览默认打开“已入库”，并可切换到“待入库”；每页按 4 列 × 2 行展示 8 个素材。标签搜索只在“已入库”视图提供，不会检索处理中、失败或等待审核的素材。素材详情可通过受控媒体接口按上传时的文件名下载正规化后的媒体。
-
-## 语义搜索（Chroma）
-
-启用 `EMBEDDING_MODEL` 后，worker 会在视觉 LLM 分析完成并保存结果后，额外创建 embedding
-任务：它会将描述、标签、OCR 及视频时间轴按字段切分、分词，调用 OpenAI 兼容的
-`/embeddings` 接口，并把向量持久化到本地 Chroma 的 `asset_analysis` collection。搜索关键词会用
-同一模型生成向量，语义命中与标签模糊匹配合并排序；Chroma 暂不可用时仍保留标签搜索。
-
-`docker compose up -d` 会启动持久化的 Chroma 服务。填写以下配置即可启用。`EMBEDDING_BASE_URL`
-和 `EMBEDDING_API_KEY` 留空时优先复用已配置的 VLM 端点和密钥；若 VLM 未配置，则复用
-LLM。embedding 模型必须与查询阶段相同：
-
-```dotenv
-CHROMA_URL=http://127.0.0.1:8100
-EMBEDDING_MODEL=text-embedding-3-small
-EMBEDDING_BASE_URL=
-EMBEDDING_API_KEY=
-```
-
-## 生产运行
-
-Web 与 worker 必须共享同一 SQLite 文件和媒体目录：
+执行完整验证：
 
 ```bash
-npm run build
-npm run start:web
-npm run start:worker
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm test:e2e
+pnpm build
 ```
 
-该模式要求持久磁盘和长期 Node 进程，不支持 Serverless。建议由反向代理提供 HTTPS、请求体限制和内网访问控制。
+媒体测试依赖 FFmpeg；MySQL 集成测试会清空 `_test` 库中的业务表，禁止把
+`TEST_DATABASE_URL` 指向生产库。详细人工验收见 [quickstart](spec/quickstart.md)。
 
-## Docker 部署
+## Docker 说明
 
-镜像只包含程序和默认配置，**不包含本机的 `.env`、SQLite 数据库或上传的媒体文件**。这样可以安全地发布到镜像仓库；运行容器时再注入模型配置，并挂载持久存储。
-
-### 前置条件
-
-- Docker Engine 已安装并处于运行状态。
-- 已准备模型服务配置。以示例文件为起点创建本机配置：
-
-  ```bash
-  cp .env.example .env
-  ```
-
-  至少确认 `.env` 中的 `VLM_PROTOCOL`、`VLM_BASE_URL`、`VLM_API_KEY`（如需要）和 `VLM_NAME` 适用于你的模型服务。不要将 `.env` 提交到 Git 或打包进镜像。
-
-### 构建镜像
-
-在仓库根目录执行：
-
-```bash
-docker build --network host -t ghcr.io/onestudentforcode/assets-library:latest .
-```
-
-如已从 GHCR 获取镜像，可跳过此步骤：
-
-```bash
-docker pull ghcr.io/onestudentforcode/assets-library:latest
-```
-
-GHCR 中由 GitHub Actions 发布的镜像同时支持 `linux/amd64` 与 `linux/arm64`；Docker 会在 x86-64 或 ARM 主机上自动拉取对应架构。若需要在本机手动发布多架构镜像，先安装并启用 Docker Buildx，再执行：
-
-```bash
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/onestudentforcode/assets-library:latest \
-  --push .
-```
-
-Dockerfile 的 Debian 构建依赖和 npm 依赖默认使用阿里云镜像：`mirrors.aliyun.com` 与 `registry.npmmirror.com`。Debian slim 初始镜像没有系统 CA 证书，因此首次 apt 安装使用 HTTP 阿里源并立即安装 `ca-certificates`；软件包索引和软件包仍由 Debian 签名验证。如需使用官方源，可通过构建参数覆盖：
-
-```bash
-docker build \
-  --network host \
-  --build-arg NPM_REGISTRY=https://registry.npmjs.org \
-  --build-arg DEBIAN_MIRROR=http://deb.debian.org/debian \
-  --build-arg DEBIAN_SECURITY_MIRROR=http://deb.debian.org/debian-security \
-  -t ghcr.io/onestudentforcode/assets-library:latest .
-```
-
-Docker Hub 基础镜像（例如 `node:22-bookworm-slim`）的拉取加速由 Docker 守护进程控制，无法写入 Dockerfile。请从阿里云容器镜像服务控制台获取个人加速地址，并写入宿主机 `/etc/docker/daemon.json`：
-
-```json
-{
-  "registry-mirrors": ["https://<你的阿里云专属地址>.mirror.aliyuncs.com"]
-}
-```
-
-在 Arch Linux 上重启 Docker 使配置生效：
-
-```bash
-sudo systemctl restart docker
-```
-
-### 一键启动（推荐）
-
-确认已创建并配置 `.env` 后，在仓库根目录执行：
-
-```bash
-docker compose up -d
-```
-
-Compose 会自动构建本地镜像、创建两个持久化 volume，然后启动 Web 和 worker。镜像入口脚本会在每个服务启动前检查并升级数据库结构；共享锁会确保 SQLite 迁移不会并发执行。当前 Compose 配置让构建与运行均使用 Linux host 网络模式，以兼容不支持 Docker bridge veth 的宿主环境，因此 Web 直接监听宿主机的 <http://localhost:3000>。
-
-查看服务状态与日志：
-
-```bash
-docker compose ps
-docker compose logs -f web worker
-```
-
-代码或 Dockerfile 更新后，使用下面的命令重新构建并启动：
-
-```bash
-docker compose up -d --build
-```
-
-停止服务但保留数据库和媒体文件：
-
-```bash
-docker compose down
-```
-
-### 首次启动
-
-Web 服务和后台 worker 是两个独立进程，必须共享同一份 SQLite 数据库和媒体目录。下面使用 Docker named volumes 保存它们；删除容器不会删除其中的数据。
-
-```bash
-docker volume create assets-library-data
-docker volume create assets-library-media
-```
-
-启动 Web 服务。镜像会先自动检查并升级数据库，然后在宿主机的 <http://localhost:3000> 提供服务：
-
-
-```bash
-docker run -d \
-  --name assets-library-web \
-  --restart unless-stopped \
-  --env-file .env \
-  --network host \
-  -v assets-library-data:/app/data \
-  -v assets-library-media:/app/media \
-  ghcr.io/onestudentforcode/assets-library:latest
-```
-
-启动后台 worker。它负责领取并处理上传后的分析任务：
-
-```bash
-docker run -d \
-  --name assets-library-worker \
-  --restart unless-stopped \
-  --env-file .env \
-  --network host \
-  -v assets-library-data:/app/data \
-  -v assets-library-media:/app/media \
-  ghcr.io/onestudentforcode/assets-library:latest \
-  npm run start:worker
-```
-
-查看运行状态与日志：
-
-```bash
-docker ps --filter name=assets-library
-docker logs -f assets-library-web
-docker logs -f assets-library-worker
-```
-
-停止服务但保留数据：
-
-```bash
-docker stop assets-library-web assets-library-worker
-docker rm assets-library-web assets-library-worker
-```
-
-升级镜像时，先拉取或重新构建新标签，删除旧容器，再按照“首次启动”中的迁移、Web 和 worker 命令重新创建容器。请勿删除 `assets-library-data` 或 `assets-library-media` volume，除非你确认要永久清空素材库。
-
-## 验证
-
-```bash
-npm run lint
-npm run typecheck
-npm test
-npm run test:e2e
-npm run build
-```
-
-更完整的验收步骤见 [spec/quickstart.md](spec/quickstart.md)。
+Dockerfile 仍可用同一镜像分别运行 Web 和 worker，但 MySQL、ZOS、Chroma 与分镜服务属于
+外部依赖。当前推荐的完整同机启动路径仍是 `./scripts/start.sh`；在容器环境中使用前，
+需要单独部署或挂载 `scene-detect-service`，并通过环境变量提供远程 MySQL CA 与 ZOS
+Secret。镜像和 Git 仓库不包含 `.env`、证书、上传文件或数据库数据。

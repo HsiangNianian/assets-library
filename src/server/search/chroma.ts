@@ -117,6 +117,16 @@ export async function indexAnalysis(assetId: string, result: AnalysisResult) {
   });
 }
 
+/** 删除素材对应的全部向量分块；未启用 embedding 时无需访问 Chroma。 */
+export async function deleteAnalysis(assetId: string) {
+  if (!semanticSearchEnabled()) return;
+  const target = await collection();
+  await chromaRequest(`/collections/${encodeURIComponent(target.id)}/delete`, {
+    method: "POST",
+    body: JSON.stringify({ where: { assetId } }),
+  });
+}
+
 export async function searchAnalysis(
   query: string,
   limit: number,
