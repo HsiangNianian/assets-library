@@ -4,7 +4,7 @@
 
 1. 安装 Node.js 22+ 和 pnpm。
 2. 执行 `cp .env.example .env` 并配置模型地址、密钥和模型名。
-3. 使用 Qwen3.7 时设置 `MODEL_ENABLE_THINKING=false`；Chat Completions 视频分析设置 `MODEL_VIDEO_MODE=frames` 和 `MODEL_VIDEO_TIMEOUT_MS=300000`。
+3. 使用 Qwen3.7 VLM 时设置 `VLM_ENABLE_THINKING=false`；Chat Completions 视频分析设置 `VLM_VIDEO_MODE=frames` 和 `VLM_VIDEO_TIMEOUT_MS=300000`。
 
 ## 启动
 
