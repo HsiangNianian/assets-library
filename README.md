@@ -63,13 +63,42 @@ NewAPI 令牌，网关关闭鉴权时可以留空；留空后请求不会发送 
 `qwen3.7` 系列默认开启思考模式。素材结构化提取不需要长推理，建议关闭以降低等待时间：
 
 ```dotenv
+VLM_NAME=qwen3.7-plus
+VLM_FALLBACK_NAMES=kimi-k2.5,Qwythos
 VLM_ENABLE_THINKING=false
 ```
 
-`LLM_PROTOCOL`、`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_NAME` 和
-`LLM_ENABLE_THINKING` 构成独立的纯文本模型配置。`LLM_BASE_URL` 和 `LLM_API_KEY`
+`VLM_FALLBACK_NAMES` 是按优先级排列的逗号分隔候选列表。主模型额度耗尽、模型不存在或
+明确不支持视觉输入时，worker 会依次切换候选；网络错误、超时、普通限流和 5xx 会先按
+`VLM_RETRY_COUNT` 重试当前模型，仍失败后再切换。401/403 鉴权失败及普通请求参数错误不会
+继续尝试共享同一端点和密钥的候选。结构化响应无效时，每个候选会获得一次纠正机会。
+
+同组候选共享 protocol、Base URL 和 API Key，模型名必须使用网关返回的精确 ID。主模型与
+fallback 合计最多 5 个，重复名称会在保留原顺序的前提下去除。显式设置的
+`VLM_ENABLE_THINKING` 会应用到整个候选链。失败候选会进入内存冷却，避免每个任务都重复
+请求已耗尽额度的模型：
+
+```dotenv
+VLM_FAILOVER_COOLDOWN_MS=1800000
+```
+
+配额和模型能力错误使用上述冷却时长；短暂故障与无效响应最多冷却 60 秒。worker 重启后
+冷却状态会清空；若所有候选都在冷却，则探测最早到期的候选。分析成功后，数据库保存实际
+完成任务的候选模型名和协议，而不是固定记录主模型。
+
+`LLM_PROTOCOL`、`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_NAME`、
+`LLM_FALLBACK_NAMES` 和 `LLM_ENABLE_THINKING` 构成独立的纯文本模型配置。`LLM_BASE_URL` 和 `LLM_API_KEY`
 留空时复用 VLM 的端点与密钥；当前业务尚未调用 LLM。每个模型组独立决定是否发送
 `enable_thinking`，不会把 VLM 的扩展参数透传给 LLM。
+
+```dotenv
+LLM_NAME=Qwythos
+LLM_FALLBACK_NAMES=kimi-k2.5
+LLM_ENABLE_THINKING=false
+```
+
+`LLM_FALLBACK_NAMES` 已按与 VLM 相同的规则完成配置解析，供后续纯文本任务直接复用；由于
+当前没有 LLM 业务调用，本次不会宣称 LLM 自动切换已经被执行。
 
 视频分析使用 Chat Completions 的多图片输入。worker 按视频时长在服务端提取 1–5 张 JPEG 关键帧，并将关键帧及其时间点交给模型；原始 MP4 只用于存储和预览。配置：
 
