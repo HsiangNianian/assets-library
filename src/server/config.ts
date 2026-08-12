@@ -8,6 +8,9 @@ const modelProtocolSchema = z.enum([
 const optionalBooleanSchema = z
   .union([z.enum(["true", "false"]), z.literal("")])
   .optional();
+const booleanSchema = z
+  .union([z.boolean(), z.enum(["true", "false"])])
+  .transform((value) => value === true || value === "true");
 const MODEL_FAMILY_THINKING_DEFAULTS = [
   { namePattern: /^qwen3\.[5-9]/i, enableThinking: false },
 ] as const;
@@ -47,10 +50,41 @@ function candidateNames(
 
 const envSchema = z
   .object({
-    DATABASE_PATH: z.string().default("./data/assets.db"),
+    DATABASE_URL: z
+      .string()
+      .url()
+      .default("mysql://assets_library_app:change-me@127.0.0.1:3306/assets_library"),
+    DATABASE_SSL_CA_PATH: z.string().optional().or(z.literal("")),
+    DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(20),
+    UPLOAD_MAX_ITEMS: z.coerce.number().int().min(1).max(100).default(100),
+    UPLOAD_MAX_TOTAL_BYTES: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(2 * 1024 * 1024 * 1024),
+    STAGING_RETENTION_HOURS: z.coerce.number().int().positive().default(24),
+    TASK_RETENTION_DAYS: z.coerce.number().int().positive().default(7),
+    CLEANUP_INTERVAL_SECONDS: z.coerce.number().int().positive().default(3_600),
     MEDIA_ROOT: z.string().default("./media"),
     MAX_IMAGE_BYTES: z.coerce.number().int().positive().default(20 * 1024 * 1024),
     MAX_VIDEO_BYTES: z.coerce.number().int().positive().default(200 * 1024 * 1024),
+    SCENE_DETECT_ENABLED: booleanSchema.default(true),
+    SCENE_DETECT_BASE_URL: z.string().url().default("http://127.0.0.1:28200"),
+    SCENE_DETECT_PROJECT_DIR: z.string().default("../scene-detect-service"),
+    SCENE_DETECT_WORKSPACE_ROOT: z.string().default("./media/.scene-service"),
+    SCENE_DETECT_PORT: z.coerce.number().int().min(1).max(65_535).default(28_200),
+    SCENE_DETECT_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
+    SCENE_DETECT_TASK_TTL_SECONDS: z.coerce.number().int().positive().default(86_400),
+    SCENE_SEGMENT_MAX_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
+    ZOS_ACCESS_KEY_ID: z.string().optional(),
+    ZOS_SECRET_ACCESS_KEY: z.string().optional(),
+    ZOS_API_ENDPOINT: z.string().url().optional().or(z.literal("")),
+    ZOS_ENDPOINT: z.string().url().optional().or(z.literal("")),
+    ZOS_BUCKET: z.string().optional(),
+    ZOS_WEB_URL: z.string().url().optional().or(z.literal("")),
+    ZOS_INTERNAL_URL: z.string().url().optional().or(z.literal("")),
+    ZOS_FORCE_PATH_STYLE: booleanSchema.default(true),
+    ZOS_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
     VLM_PROTOCOL: modelProtocolSchema.default("openai_chat_completions"),
     VLM_BASE_URL: z.string().url().optional().or(z.literal("")),
     VLM_API_KEY: z.string().optional(),
@@ -188,6 +222,7 @@ export function loadConfig(
   env: Record<string, string | undefined> = process.env,
 ) {
   const parsed = envSchema.parse(env);
+  const databaseSslCaPath = optionalValue(parsed.DATABASE_SSL_CA_PATH);
   const vlm = modelTarget(
     "vlm",
     parsed.VLM_PROTOCOL,
@@ -235,8 +270,21 @@ export function loadConfig(
     optionalValue(parsed.EMBEDDING_API_KEY) ?? embeddingFallbackTarget?.apiKey;
   return {
     ...parsed,
-    databasePath: path.resolve(parsed.DATABASE_PATH),
+    databaseUrl: parsed.DATABASE_URL,
+    databaseSslCaPath: databaseSslCaPath
+      ? path.resolve(databaseSslCaPath)
+      : undefined,
     mediaRoot: path.resolve(parsed.MEDIA_ROOT),
+    sceneDetectProjectDir: path.resolve(parsed.SCENE_DETECT_PROJECT_DIR),
+    sceneDetectWorkspaceRoot: path.resolve(parsed.SCENE_DETECT_WORKSPACE_ROOT),
+    zosConfigured: Boolean(
+      optionalValue(parsed.ZOS_ACCESS_KEY_ID) &&
+      optionalValue(parsed.ZOS_SECRET_ACCESS_KEY) &&
+      (optionalValue(parsed.ZOS_API_ENDPOINT) ||
+          optionalValue(parsed.ZOS_ENDPOINT) ||
+          optionalValue(parsed.ZOS_INTERNAL_URL)) &&
+      optionalValue(parsed.ZOS_BUCKET),
+    ),
     models: { vlm, llm, vlmCandidates, llmCandidates },
     embeddingBaseUrl,
     embeddingApiKey,

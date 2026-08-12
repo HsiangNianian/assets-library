@@ -1,15 +1,12 @@
 #!/bin/sh
 set -eu
 
-database_dir=$(dirname "$DATABASE_PATH")
-mkdir -p "$database_dir" "$MEDIA_ROOT"
-chown -R node:node "$database_dir" "$MEDIA_ROOT"
+mkdir -p "$MEDIA_ROOT"
+chown -R node:node "$MEDIA_ROOT"
 
-# Each long-running service verifies the schema before it starts. flock keeps
-# Web and worker from running SQLite migrations concurrently on first startup.
+# MySQL 迁移命令由 Drizzle 的迁移表保证幂等；Web 和 worker 启动前均可安全执行。
 if [ "${RUN_MIGRATIONS:-true}" = "true" ]; then
-  flock "$database_dir/.migration.lock" \
-    setpriv --reuid=node --regid=node --init-groups \
+  setpriv --reuid=node --regid=node --init-groups \
     ./node_modules/.bin/tsx --env-file=.env src/server/db/migrate.ts
 fi
 

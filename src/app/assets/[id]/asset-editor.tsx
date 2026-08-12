@@ -18,29 +18,32 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import type { AssetDetail } from "@/shared/contracts";
+import {
+  browserMediaUrl,
+  uiApi,
+  waitForTask,
+} from "@/lib/api-v1-client";
+import type { ApiV1AssetDetail, TaskAccepted } from "@/shared/contracts";
 
 const statusLabel = {
   queued: "等待处理",
-  validating: "校验中",
-  analyzing: "分析中",
-  completed: "分析完成",
+  running: "处理中",
+  done: "分析完成",
   failed: "处理失败",
 };
 
-async function api<T>(url: string, init?: RequestInit) {
-  const response = await fetch(url, {
-    ...init,
-    headers: { "content-type": "application/json", ...init?.headers },
-  });
-  const payload = response.status === 204 ? null : await response.json();
-  if (!response.ok) {
-    throw new Error(payload?.error?.message ?? "操作失败");
-  }
-  return payload as T;
+function detailPath(asset: ApiV1AssetDetail) {
+  const query = asset.user_id
+    ? `?user_id=${encodeURIComponent(asset.user_id)}`
+    : "";
+  return `/assets/${asset.asset_id}${query}`;
 }
 
-export function AssetEditor({ initialAsset }: { initialAsset: AssetDetail }) {
+export function AssetEditor({
+  initialAsset,
+}: {
+  initialAsset: ApiV1AssetDetail;
+}) {
   const router = useRouter();
   const [asset, setAsset] = useState(initialAsset);
   const [name, setName] = useState(initialAsset.name);
@@ -50,16 +53,21 @@ export function AssetEditor({ initialAsset }: { initialAsset: AssetDetail }) {
   );
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const assetId = asset.asset_id;
+  const assetStatus = asset.status;
+  const assetUserId = asset.user_id;
 
   useEffect(() => {
-    if (!["queued", "validating", "analyzing"].includes(asset.processingStatus)) return;
+    if (!["queued", "running"].includes(assetStatus)) return;
+    const query = assetUserId
+      ? `?user_id=${encodeURIComponent(assetUserId)}`
+      : "";
+    const path = `/assets/${assetId}${query}`;
     const timer = window.setInterval(async () => {
       try {
-        const next = await api<AssetDetail>(`/api/assets/${asset.id}`, {
-          cache: "no-store",
-        });
+        const next = await uiApi<ApiV1AssetDetail>(path);
         setAsset(next);
-        if (next.processingStatus === "completed") {
+        if (next.status === "done") {
           setDescription(next.description);
           setTagText(next.tags.map((tag) => `${tag.category}:${tag.value}`).join("\n"));
         }
@@ -68,7 +76,7 @@ export function AssetEditor({ initialAsset }: { initialAsset: AssetDetail }) {
       }
     }, 1_500);
     return () => window.clearInterval(timer);
-  }, [asset.id, asset.processingStatus]);
+  }, [assetId, assetStatus, assetUserId]);
 
   const parsedTags = useMemo(
     () =>
@@ -103,10 +111,17 @@ export function AssetEditor({ initialAsset }: { initialAsset: AssetDetail }) {
 
   const save = () =>
     run(async () => {
-      const next = await api<AssetDetail>(`/api/assets/${asset.id}`, {
+      const task = await uiApi<TaskAccepted>(`/assets/${asset.asset_id}`, {
         method: "PATCH",
-        body: JSON.stringify({ name, description, tags: parsedTags }),
+        body: JSON.stringify({
+          user_id: asset.user_id,
+          name,
+          description,
+          tags: parsedTags,
+        }),
       });
+      await waitForTask(task);
+      const next = await uiApi<ApiV1AssetDetail>(detailPath(asset));
       setAsset(next);
       setMessage("更改已保存。");
       router.refresh();
@@ -114,13 +129,25 @@ export function AssetEditor({ initialAsset }: { initialAsset: AssetDetail }) {
 
   const publish = () =>
     run(async () => {
-      await api(`/api/assets/${asset.id}`, {
+      const updateTask = await uiApi<TaskAccepted>(`/assets/${asset.asset_id}`, {
         method: "PATCH",
-        body: JSON.stringify({ name, description, tags: parsedTags }),
+        body: JSON.stringify({
+          user_id: asset.user_id,
+          name,
+          description,
+          tags: parsedTags,
+        }),
       });
-      const next = await api<AssetDetail>(`/api/assets/${asset.id}/publish`, {
-        method: "POST",
-      });
+      await waitForTask(updateTask);
+      const publishTask = await uiApi<TaskAccepted>(
+        `/assets/${asset.asset_id}/publish`,
+        {
+          method: "POST",
+          body: JSON.stringify({ user_id: asset.user_id }),
+        },
+      );
+      await waitForTask(publishTask);
+      const next = await uiApi<ApiV1AssetDetail>(detailPath(asset));
       setAsset(next);
       setMessage("素材已正式入库。");
       router.refresh();
@@ -128,16 +155,30 @@ export function AssetEditor({ initialAsset }: { initialAsset: AssetDetail }) {
 
   const retry = () =>
     run(async () => {
-      await api(`/api/assets/${asset.id}/retry`, { method: "POST" });
-      const next = await api<AssetDetail>(`/api/assets/${asset.id}`);
+      const task = await uiApi<TaskAccepted>(
+        `/assets/${asset.asset_id}/retry`,
+        {
+          method: "POST",
+          body: JSON.stringify({ user_id: asset.user_id }),
+        },
+      );
+      await waitForTask(task);
+      const next = await uiApi<ApiV1AssetDetail>(detailPath(asset));
       setAsset(next);
       setMessage("已重新加入处理队列。");
     });
 
   const remove = () =>
     run(async () => {
-      if (!window.confirm("确认删除这份素材？文件将由后台任务清理。")) return;
-      await api(`/api/assets/${asset.id}`, { method: "DELETE" });
+      const action = asset.user_id
+        ? "移出个人素材库并转为公共素材"
+        : "永久删除公共素材及其文件";
+      if (!window.confirm(`确认${action}？`)) return;
+      const task = await uiApi<TaskAccepted>(`/assets/${asset.asset_id}`, {
+        method: "DELETE",
+        body: JSON.stringify({ user_id: asset.user_id }),
+      });
+      await waitForTask(task);
       router.push("/");
       router.refresh();
     });
@@ -147,37 +188,37 @@ export function AssetEditor({ initialAsset }: { initialAsset: AssetDetail }) {
       <div className="mb-8 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
           <div className="mb-3 flex flex-wrap items-center gap-2">
-            <Badge>{asset.mediaType === "image" ? "图片" : "视频"}</Badge>
+            <Badge>{asset.media_type === "image" ? "图片" : "视频"}</Badge>
             <Badge
               className={
-                asset.processingStatus === "failed"
+                asset.status === "failed"
                   ? "bg-red-100 text-red-700"
-                  : asset.processingStatus === "completed"
+                  : asset.status === "done"
                     ? "bg-emerald-100 text-emerald-700"
                     : "bg-amber-100 text-amber-700"
               }
             >
-              {statusLabel[asset.processingStatus]}
+              {statusLabel[asset.status]}
             </Badge>
             <Badge>
-              {asset.reviewStatus === "published" ? "已入库" : "待审核"}
+              {asset.review_status === "published" ? "已入库" : "待审核"}
             </Badge>
           </div>
           <h1 className="text-3xl font-bold tracking-tight">{asset.name}</h1>
           <p className="mt-2 text-sm text-slate-500">
-            {asset.originalFilename} · {(asset.sizeBytes / 1024 / 1024).toFixed(1)} MB
+            {asset.original_filename} · {(asset.size_bytes / 1024 / 1024).toFixed(1)} MB
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          {asset.processingStatus === "failed" && (
+          {asset.status === "failed" && (
             <Button variant="outline" disabled={busy} onClick={retry}>
               <RefreshCcw className="size-4" /> 重试
             </Button>
           )}
           <Button asChild variant="outline">
             <a
-              href={`/api/media/${asset.id}?download=1`}
-              download={asset.originalFilename}
+              href={`${browserMediaUrl(asset.media_url)}${asset.media_url.includes("?") ? "&" : "?"}download=1`}
+              download={asset.original_filename}
             >
               <Download className="size-4" /> 下载素材
             </a>
@@ -188,12 +229,12 @@ export function AssetEditor({ initialAsset }: { initialAsset: AssetDetail }) {
         </div>
       </div>
 
-      {asset.failureMessage && (
+      {asset.failure && (
         <div className="mb-6 flex gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
           <AlertCircle className="mt-0.5 size-5 shrink-0" />
           <div>
-            <p className="font-medium">{asset.failureMessage}</p>
-            <p className="mt-1 font-mono text-xs">{asset.failureCode}</p>
+            <p className="font-medium">{asset.failure.message}</p>
+            <p className="mt-1 font-mono text-xs">{asset.failure.code}</p>
           </div>
         </div>
       )}
@@ -203,8 +244,8 @@ export function AssetEditor({ initialAsset }: { initialAsset: AssetDetail }) {
           <Card className="overflow-hidden">
             <div className="aspect-video min-h-72 bg-slate-100">
               <MediaPreview
-                mediaType={asset.mediaType}
-                src={asset.mediaUrl}
+                mediaType={asset.media_type}
+                src={browserMediaUrl(asset.media_url)}
                 name={asset.name}
               />
             </div>
@@ -223,12 +264,12 @@ export function AssetEditor({ initialAsset }: { initialAsset: AssetDetail }) {
                 />
               ) : (
                 <div className="flex items-center gap-3 py-8 text-sm text-slate-500">
-                  {asset.processingStatus === "failed" ? (
+                  {asset.status === "failed" ? (
                     <AlertCircle className="size-5" />
                   ) : (
                     <Clock3 className="size-5 animate-pulse" />
                   )}
-                  {asset.processingStatus === "failed"
+                  {asset.status === "failed"
                     ? "暂无可用分析结果。"
                     : "后台正在分析素材，页面会自动更新。"}
                 </div>
@@ -274,8 +315,8 @@ export function AssetEditor({ initialAsset }: { initialAsset: AssetDetail }) {
               <Button variant="outline" disabled={busy} onClick={save}>
                 <Save className="size-4" /> 保存
               </Button>
-              {asset.reviewStatus === "pending_review" &&
-                asset.processingStatus === "completed" && (
+              {asset.review_status === "pending_review" &&
+                asset.status === "done" && (
                   <Button disabled={busy} onClick={publish}>
                     <Send className="size-4" /> 确认入库
                   </Button>
@@ -293,7 +334,7 @@ function AnalysisView({
   description,
   tags,
 }: {
-  analysis: AssetDetail["analysis"];
+  analysis: ApiV1AssetDetail["analysis"];
   description: string;
   tags: Array<{ category: string; value: string }>;
 }) {
@@ -321,7 +362,7 @@ function AnalysisView({
         ))}
         <div>
           <p className="mb-2 font-medium text-slate-500">OCR</p>
-          <p>{analysis.ocr.text ?? analysis.ocr.unavailableReason ?? "无可识别文本"}</p>
+          <p>{analysis.ocr.text ?? analysis.ocr.unavailable_reason ?? "无可识别文本"}</p>
         </div>
       </div>
     );
@@ -336,14 +377,14 @@ function AnalysisView({
       </div>
       <TimedSection
         title="视觉分段"
-        items={analysis.visualSegments.map((segment) => ({
-          time: `${formatSeconds(segment.startSeconds)}–${formatSeconds(segment.endSeconds)}`,
+        items={analysis.visual_segments.map((segment) => ({
+          time: `${formatSeconds(segment.start_seconds)}–${formatSeconds(segment.end_seconds)}`,
           summary: segment.summary,
         }))}
       />
       <TimedSection
         title="关键时间点"
-        items={analysis.keyMoments.map((moment) => ({
+        items={analysis.key_moments.map((moment) => ({
           time: formatSeconds(moment.seconds),
           summary: moment.summary,
         }))}
@@ -351,7 +392,7 @@ function AnalysisView({
       <TimedSection
         title="时间轴"
         items={analysis.timeline.map((entry) => ({
-          time: `${formatSeconds(entry.startSeconds)}–${formatSeconds(entry.endSeconds)}`,
+          time: `${formatSeconds(entry.start_seconds)}–${formatSeconds(entry.end_seconds)}`,
           summary: entry.summary,
         }))}
       />

@@ -1,16 +1,16 @@
 # 技术研究结论
 
-## SQLite 任务队列
+## MySQL 持久任务队列
 
-单机 MVP 使用 SQLite WAL。worker 在 `BEGIN IMMEDIATE` 事务内选择并抢占最早可用任务，运行期间每 30 秒更新任务心跳并周期扫描；超过两分钟没有心跳的 `running` 任务重新排队。这样既不需要 Redis，也避免 worker 异常退出后素材永久停留在“分析中”。
+Web 与 worker 共享 MySQL 8。worker 在事务内通过 `SELECT ... FOR UPDATE SKIP LOCKED` 抢占任务，业务变更、任务状态和可重试作业均持久化。启动和周期性 reconciliation 负责收敛进程崩溃窗口，因此无需 Redis，也不会把未入库结果长期放在进程内存。
 
 ## 流式 multipart
 
-Next.js Route Handler 使用 Busboy 读取 Web Stream 并直接写临时文件，检查接口对应的扩展名、声明 MIME 和大小后原子重命名并入队。内容签名、解码和视频编码校验由 worker 执行，避免大视频进入 JS 堆内存或长时间占用上传请求。
+API v1 先创建任务清单，再以 PUT 将每个请求体流式写入随机 staging 文件，完整接收后原子重命名；封存任务后才进入处理链。上传租约拒绝同一 item 的并发 PUT，中断会清零数据库进度并删除残留，允许完整重试。客户端声明 MIME 仅作审计，内容签名、完整解码和转换由 worker 执行。
 
-## 不转码策略
+## 目标格式正规化策略
 
-图片只接受浏览器和模型普遍可用的 JPEG、PNG、WebP。视频限定为 MP4/H.264；检测到 HEVC、VP9 或 AV1 时直接拒绝。原文件通过 Range API 预览。
+图片目标格式限定为 JPEG、PNG、WebP；真实内容为另一种受支持格式时，Sharp 在同目录生成临时产物，验证后原子替换。父视频先正规化，再由同机分镜服务切片；所有切片必须完整可解码且各自不超过 10 MiB。任一切片失败时，父视频、切片、ZOS 对象和 MySQL 素材整批不可见。通过该边界后，切片独立分析。长期媒体进入私有 ZOS，并由 API Range 流式返回。
 
 ## 模型兼容层
 

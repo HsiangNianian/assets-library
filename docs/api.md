@@ -1,248 +1,438 @@
-# 素材库 HTTP API
+# 素材库 HTTP API v1
 
-本文档描述当前服务端实际提供的 API。除媒体上传外，所有请求和响应均使用 JSON；当前版本没有应用层鉴权。
+本文档描述当前代码实际提供的 HTTP 接口。业务接口统一使用 `/api/v1` 前缀和
+`snake_case` 字段；不再提供旧版接口。
 
-## 约定
+## 1. 通用约定
 
-- Base URL：`http://<host>:3000`
-- 素材、上传记录 ID 均为 UUID。
-- 日期时间字段使用 ISO 8601 字符串；媒体文件大小使用字节数。
-- 除明确标注外，失败响应均使用以下格式：
+- Base URL：`http(s)://<assets-library-host>`，本文不绑定具体主机或端口。
+- ID（`task_id`、`item_id`、`asset_id`、`parent_video_id`）均为 UUID。
+- 关系数据库保存 UTC；JSON 时间使用 ISO 8601，并以上海时区偏移 `+08:00` 返回。
+- 文件大小单位均为 byte。默认单任务最多 100 个文件、总计最多 2 GiB。
+- JSON 请求体上限为 1 MiB；文件内容通过单独的流式 PUT 上传。
+- 所有创建、更新、发布、重试、删除操作都是异步任务。调用方应保存
+  `task_id`，再轮询统一任务接口，或提供 `callback_url`。
+- 所有 `/api/v1` 业务响应均带 `X-Request-Id`；调用方也可传入合法
+  UUID 格式的 `X-Request-Id` 便于链路排查。
+
+完整的机器可读定义见 [`spec/contracts/openapi.yaml`](../spec/contracts/openapi.yaml)。
+
+## 2. 访问边界
+
+本项目仅部署在可信内网，HTTP 接口不要求 API Key、登录会话或签名 URL。
+浏览器可直接打开 Web UI，服务间调用也不需要鉴权 Header。`/api/ui/v1/**`
+代理仍拒绝跨站浏览器请求，但这只是同源约束，不是身份认证。
+
+`user_id` 用于素材归属和查询范围，不是鉴权凭据；调用方可自行传入该字段。
+因此服务不能直接暴露到公网，公网或跨信任域部署必须在上游反向代理、防火墙或
+API 网关增加访问控制。
+
+## 3. 统一错误格式
 
 ```json
 {
   "error": {
     "code": "invalid_request",
-    "message": "请求字段无效。"
-  }
+    "message": "请求字段无效。",
+    "details": [
+      {
+        "item_id": "8df50279-9094-44c4-bc5e-a2d9b7417504",
+        "segment_index": 3,
+        "size_bytes": 11534336,
+        "limit_bytes": 10485760
+      }
+    ]
+  },
+  "request_id": "9264af56-01cc-4fbe-9560-8df51ef3f668"
 }
 ```
 
-常见错误码：`invalid_request`、`multiple_files`、`unsupported_media_type`、`file_too_large`、`corrupt_file`、`unsupported_video_codec`、`invalid_video_frames`、`model_not_configured`、`model_video_unsupported`、`video_frames_missing`、`model_request_failed`、`model_response_invalid`、`storage_error`、`internal_error`。
+`details` 仅在有逐文件或逐切片诊断时出现。稳定错误码包括：
 
-## 上传与处理状态
+- 请求与范围：`invalid_request`、`forbidden`、`not_found`、
+  `conflict`、`task_not_ready`、`task_expired`。
+- 上传与媒体：`upload_incomplete`、`upload_size_mismatch`、
+  `unsupported_media_type`、`file_too_large`、`corrupt_file`、
+  `unsupported_video_codec`、`invalid_video_frames`。
+- 分镜：`scene_detection_failed`、`segment_too_large`。
+- 模型：`model_not_configured`、`model_video_unsupported`、
+  `video_frames_missing`、`model_request_failed`、`model_response_invalid`。
+- 基础设施：`storage_error`、`database_error`、`callback_failed`、
+  `service_unavailable`、`internal_error`。
 
-### `POST /api/uploads/images`
+常见 HTTP 状态：
 
-上传一张图片。文件流式落盘并入队后返回 `202`；内容校验、分析与向量索引由后台 worker 异步执行。
+| 状态 | 场景 |
+| --- | --- |
+| `400 Bad Request` | JSON、UUID、字段或媒体声明无效。 |
+| `403 Forbidden` | 跨站 UI 请求或素材作用域不允许。 |
+| `404 Not Found` | 任务、item、素材或持久化对象不存在。 |
+| `409 Conflict` | 当前状态不允许操作、上传未完整或媒体尚不可读。 |
+| `413 Content Too Large` | JSON 请求体超过 1 MiB。 |
+| `416 Range Not Satisfiable` | 媒体 Range 语法错误或区间不可满足。 |
+| `500/502/503` | 内部处理、上游存储或必要配置/服务异常。 |
 
-请求类型：`multipart/form-data`
+## 4. 三步流式上传
 
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `file` | 文件 | 是 | 单个 JPEG、PNG、WebP 图片。 |
-| `directPublish` | `"true"` / `"false"` | 否 | 为 `true` 时，分析成功后直接入库；默认 `false`。 |
+一次上传对应一个 `task_id`，任务响应同时展示总体状态和每个文件的状态。
 
-图片默认最大 20 MiB，视频默认最大 200 MiB；可由 `MAX_IMAGE_BYTES`、`MAX_VIDEO_BYTES` 配置覆盖。
+### 4.1 第一步：创建上传清单
 
-### `POST /api/uploads/videos`
-
-上传一个 H.264 MP4 视频。文件流式落盘并入队后返回 `202`；worker 随后校验 MP4/H.264 内容，使用服务端 FFmpeg 均匀抽取 1–5 张 JPEG 关键帧，再调用模型分析。
-
-视频示例：
-
-```bash
-curl -X POST http://localhost:3000/api/uploads/videos \
-  -F 'file=@demo.mp4;type=video/mp4' \
-  -F 'directPublish=false'
-```
-
-成功响应：`202 Accepted`
-
-```json
-{
-  "uploadId": "0bd9d30b-4f29-4ab8-8d0c-9af5b3e6f6e6",
-  "assetId": "3c3eb3fd-e239-4d85-8a2c-e99f2b175c4a",
-  "mediaType": "image",
-  "processingStatus": "queued",
-  "reviewStatus": "pending_review",
-  "progressPercent": 10,
-  "failureCode": null,
-  "failureMessage": null
-}
-```
-
-### `GET /api/uploads/{uploadId}`
-
-查询上传任务状态。前端可在处理中的素材上定时轮询此接口。
-
-成功响应：`200 OK`，字段与上传接口响应相同。
-
-`processingStatus` 可能为：`queued`、`validating`、`analyzing`、`completed`、`failed`。`validating` 阶段执行图片签名/解码或 MP4/H.264 校验；视频关键帧也在此阶段提取。
-
-## 素材查询
-
-### `GET /api/assets`
-
-分页获取未删除素材。
-
-| 参数 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `view` | `published` / `pending` | `published` | `published` 仅返回已入库素材；`pending` 返回待审核和处理中素材。 |
-| `page` | 正整数 | `1` | 页码。 |
-| `limit` | `1`–`50` | `8` | 每页数量。 |
-| `tag` | 字符串，最长 128 | 无 | 仅 `published` 视图生效。执行标签精确、前缀、包含与轻微错别字匹配；启用向量服务时也会合并分析结果的语义召回。 |
-
-```bash
-curl 'http://localhost:3000/api/assets?view=published&page=1&limit=8&tag=%E6%B0%B4%E6%9E%9C'
-```
-
-成功响应：`200 OK`
+`POST /api/v1/uploads`
 
 ```json
 {
+  "user_id": "user_123",
+  "callback_url": "https://internal.example/callbacks/assets",
+  "auto_publish": false,
   "items": [
     {
-      "id": "3c3eb3fd-e239-4d85-8a2c-e99f2b175c4a",
-      "name": "产品主视觉",
-      "description": "白色背景下的橙子产品图。",
-      "mediaType": "image",
-      "processingStatus": "completed",
-      "reviewStatus": "published",
-      "tags": [
-        { "category": "object", "value": "橙子", "source": "human", "confidence": null }
-      ],
-      "mediaUrl": "/api/media/3c3eb3fd-e239-4d85-8a2c-e99f2b175c4a",
-      "createdAt": "2026-08-03T10:00:00.000Z",
-      "searchScore": 1000,
-      "semanticScore": 0.612
-    }
-  ],
-  "page": 1,
-  "pageSize": 8,
-  "total": 1,
-  "totalPages": 1
-}
-```
-
-`searchScore` 与 `semanticScore` 仅在提供 `tag` 参数且命中结果时出现，便于检索诊断：
-
-- `searchScore` 是最终排序分，取标签匹配与语义匹配的较高值。
-- `semanticScore` 是 0–1 的向量相似度。仅大于 `0.55` 的语义结果可单独返回；`(0.45, 0.55]` 区间必须同时命中标签；不超过 `0.45` 的语义结果会过滤。
-
-### `POST /api/search`
-
-根据自然语言描述检索已入库素材。该接口默认返回相似度最高的 5 个结果；传入 `keywords` 时，服务会先复用标签搜索的模糊匹配规则（精确、前缀、包含与轻微错别字容错）进行 **AND** 粗筛，再把候选 ID 交给 Chroma 执行向量检索。
-
-```bash
-curl -X POST http://localhost:3000/api/search \
-  -H 'content-type: application/json' \
-  --data '{
-    "description": "白色背景下的橙色柑橘产品静物图",
-    "keywords": ["白色", "橙子"],
-    "limit": 5
-  }'
-```
-
-请求字段：
-
-| 字段 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `description` | 字符串，1–1,000 字符 | — | 用于 embedding 的自然语言描述。 |
-| `keywords` | 字符串数组，最多 10 项 | 无 | 可选的标签粗筛条件；每个关键词都必须按现有标签模糊匹配规则命中同一素材。 |
-| `limit` | 整数，1–20 | `5` | 返回的最大素材数量。 |
-
-成功响应：`200 OK`
-
-```json
-{
-  "items": [
+      "filename": "product.png",
+      "size_bytes": 182304,
+      "content_type": "image/png"
+    },
     {
-      "id": "3c3eb3fd-e239-4d85-8a2c-e99f2b175c4a",
-      "name": "产品主视觉",
-      "mediaType": "image",
-      "semanticScore": 0.612,
-      "searchScore": 153
+      "filename": "demo.mp4",
+      "size_bytes": 52428800,
+      "content_type": "video/mp4"
     }
   ]
 }
 ```
 
-Chroma 或 embedding 服务未配置时返回 `503`；没有符合关键词粗筛或语义阈值的结果时返回 `200` 与空数组。
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `user_id` | `string \| null` | 否 | 1–191 字符。空字符串会规范化为 `null`；`null` 表示公共素材。 |
+| `callback_url` | `string(url) \| null` | 否 | 任务终态回调，只支持 HTTP/HTTPS，最长 2,048 字符。 |
+| `auto_publish` | `boolean` | 否 | 分析成功后是否直接发布，默认 `false`。 |
+| `items` | `array` | 是 | 1–100 项，总声明大小不超过 2 GiB。 |
+| `items[].filename` | `string` | 是 | 1–255 字符；扩展名决定目标媒体格式。 |
+| `items[].size_bytes` | `integer` | 是 | 正整数，文件的精确字节数。 |
+| `items[].content_type` | `string \| null` | 否 | 客户端声明 MIME，仅用于记录；服务端以内容解码验证。 |
 
-### `GET /api/assets/{assetId}`
+当前目标扩展名支持 `.jpg`、`.jpeg`、`.png`、`.webp`、`.mp4`。图片或视频
+内容与扩展名不一致时，服务端会把内容真实转换成扩展名对应的标准格式；内容
+损坏或无法转换时任务失败。
 
-获取单个素材的完整详情与原始分析结果。
+成功返回 `201 Created` 和完整 `TaskStatus`。从响应中的 `items[].item_id`
+取得第二步上传地址。
 
-成功响应：`200 OK`
+### 4.2 第二步：逐文件流式上传
 
-除列表字段外，还会返回：
+`PUT /api/v1/uploads/{task_id}/items/{item_id}`
 
-| 字段 | 说明 |
-| --- | --- |
-| `originalFilename` | 原始上传文件名。 |
-| `mimeType` | 服务端验证后的 MIME 类型。 |
-| `sizeBytes` | 文件大小。 |
-| `directPublish` | 是否在分析完成后自动入库。 |
-| `failureCode` / `failureMessage` | 处理失败时的错误信息。 |
-| `analysis` | 模型原始分析结果；未完成时为 `null`。图片包含描述、分类标签和 OCR；视频包含描述、主题、视觉分段、关键时间点和时间轴。 |
-| `updatedAt` | 最后一次元数据更新日期。 |
-
-素材不存在或已删除时返回 `404`。
-
-## 编辑与审核
-
-### `PATCH /api/assets/{assetId}`
-
-整体更新素材名称、描述和标签。标签每项必须指定分类与值；提交的标签会替换该素材现有标签。
+请求体是该文件的原始二进制流，不是 multipart。建议发送准确的
+`Content-Length` 和真实 `Content-Type`：
 
 ```bash
-curl -X PATCH http://localhost:3000/api/assets/3c3eb3fd-e239-4d85-8a2c-e99f2b175c4a \
-  -H 'content-type: application/json' \
-  --data '{
-    "name": "产品主视觉",
-    "description": "人工确认后的描述。",
-    "tags": [
-      { "category": "scene", "value": "白色背景" },
-      { "category": "object", "value": "橙子" }
-    ]
-  }'
+curl -X PUT \
+  -H 'Content-Type: image/png' \
+  -H 'Content-Length: 182304' \
+  --data-binary @product.png \
+  'https://<host>/api/v1/uploads/<task_id>/items/<item_id>'
 ```
 
-字段限制：
+服务端流式写入 `media/.staging`，不会把整个文件保存在 Node.js 内存中。
+实际字节数必须与第一步声明完全相等；多或少都会返回
+`upload_size_mismatch`。成功返回 `202 Accepted` 和更新后的完整
+`TaskStatus`。已封存任务不能继续写入。
 
-- `name`：去除首尾空白后 1–255 字符。
-- `description`：最长 10,000 字符。
-- `tags`：最多 100 项；`category` 最长 64 字符，`value` 最长 128 字符。
+### 4.3 第三步：封存并启动处理
 
-成功响应：`200 OK`，返回更新后的素材详情。
+`POST /api/v1/uploads/{task_id}`
 
-### `POST /api/assets/{assetId}/publish`
+无请求体。只有全部 item 都完整接收后才能封存；否则返回 `409`。成功返回
+`202 Accepted`，并开始校验、图片正规化、视频分镜、ZOS 持久化、MySQL
+建档和模型分析。封存后不能增加、删除或重传 item。
 
-将分析已完成的待审核素材正式入库。
+### 4.4 图片处理语义
 
-成功响应：`200 OK`，返回已更新的素材详情。
+图片会完整解码并按文件扩展名正规化，然后先写入 ZOS、校验对象大小，再在
+MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对象。成功持久化后
+立即清理本地 staging 文件。
 
-若分析尚未完成，返回 `409` 与 `invalid_request`。
+### 4.5 视频父子模型与整批边界
 
-### `POST /api/assets/{assetId}/retry`
+- 完整视频先正规化为标准 H.264 MP4，作为内部父视频持久化，但不作为可检索
+  素材，也不执行 VLM 分析。
+- 分镜服务把父视频切成多个子视频；每个子视频才是一条 `video` 素材。
+- 所有切片必须下载完整、可解码、符合标准格式，并且每个切片不超过
+  10 MiB（10,485,760 bytes）。
+- 任一切片损坏、下载不完整或超限，父视频和全部切片都不进入 ZOS/MySQL，
+  即使 `auto_publish=true` 也一样；错误 `details` 会指出失败切片。
+- 父视频、全部切片的 ZOS 上传验证和 MySQL 建档属于“整批全有或全无”边界。
+  MySQL 事务失败时会反向补偿删除已上传对象。
+- 整批持久化成功后，各子视频沿用原有 1–5 张关键帧 VLM 流程独立分析。
+  某个子视频分析失败不会回滚已经持久化的兄弟切片，但上传任务会显示对应
+  item/asset 的失败状态。
+- 成功后立即清理本地父视频、切片和分镜服务副本；失败或未封存 staging 文件
+  保留 24 小时，并由 worker 每小时扫描。
 
-仅对处理失败的素材重新排队分析。
+## 5. 统一任务查询与回调
 
-成功响应：`202 Accepted`，返回上传状态。
+### `GET /api/v1/tasks/{task_id}`
 
-### `DELETE /api/assets/{assetId}`
+统一查询上传、更新、发布、重试、删除任务。任务历史默认保留 7 天。
 
-软删除素材，并异步清理媒体文件。
-
-成功响应：`204 No Content`。
-
-## 媒体访问
-
-### `GET /api/media/{assetId}`
-
-流式返回原始图片或视频，支持 HTTP `Range` 请求，适合 `<img>`、`<video>` 与断点续传。
-
-| 参数 | 说明 |
-| --- | --- |
-| `download=1` | 以原始文件名作为附件下载。 |
-
-响应可能为：
-
-- `200 OK`：返回完整媒体。
-- `206 Partial Content`：响应 `Range` 请求，包含 `Content-Range`。
-- `404`：素材不存在、已删除或媒体文件不可用。
-
-```bash
-curl -L -OJ 'http://localhost:3000/api/media/3c3eb3fd-e239-4d85-8a2c-e99f2b175c4a?download=1'
+```json
+{
+  "task_id": "cb953fd7-1f91-44a9-8ef6-c65635b954d0",
+  "task_type": "upload",
+  "status": "running",
+  "phase": "analyzing",
+  "progress_percent": 50,
+  "received_bytes": 52611104,
+  "total_bytes": 52611104,
+  "total_items": 2,
+  "done_items": 1,
+  "failed_items": 0,
+  "callback_url": null,
+  "result": null,
+  "items": [
+    {
+      "item_id": "8df50279-9094-44c4-bc5e-a2d9b7417504",
+      "filename": "product.png",
+      "media_type": "image",
+      "status": "done",
+      "phase": "finished",
+      "received_bytes": 182304,
+      "total_bytes": 182304,
+      "progress_percent": 100,
+      "asset_ids": ["101ed605-3dc8-46b8-aebb-57fca02b75f7"],
+      "error": null
+    }
+  ],
+  "error": null,
+  "created_at": "2026-08-12T18:00:00.000+08:00",
+  "started_at": "2026-08-12T18:00:03.000+08:00",
+  "finished_at": null,
+  "expires_at": "2026-08-19T18:00:00.000+08:00"
+}
 ```
+
+`TaskStatus` 字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `task_id` | `string(uuid)` | 全局任务 ID，所有后续轮询都使用它。 |
+| `task_type` | `upload\|update\|publish\|retry\|delete` | 异步操作类型。 |
+| `status` | `queued\|running\|done\|failed` | 稳定总体状态。 |
+| `phase` | `TaskPhase` | 当前细粒度阶段。 |
+| `progress_percent` | `number` | 0–100 的总体进度。 |
+| `received_bytes` / `total_bytes` | `integer` | 整个任务已接收/声明字节数。 |
+| `total_items` / `done_items` / `failed_items` | `integer` | 文件总数、成功数和失败数。 |
+| `callback_url` | `string(url) \| null` | 创建任务时登记的终态回调。 |
+| `result` | `object \| null` | 任务终态业务结果，未完成时通常为 `null`。 |
+| `items` | `TaskItem[]` | 每个原始上传文件的状态。 |
+| `error` | `ApiError \| null` | 总体失败信息。 |
+| `created_at` | `string(date-time)` | 任务创建时间。 |
+| `started_at` / `finished_at` / `expires_at` | `string(date-time) \| null` | 开始、结束和任务记录过期时间。 |
+
+`TaskItem` 额外包含 `item_id`、`filename`、`media_type`、逐文件 `status` /
+`phase` / 字节进度、`asset_ids` 和 `error`。图片成功后通常产生一个
+`asset_id`；视频 item 可产生多个切片素材 ID，父视频 ID 不在此数组中。
+
+稳定任务状态只有 `queued`、`running`、`done`、`failed`。更细的执行位置由
+`phase` 表示：`receiving`、`waiting_for_seal`、`validating`、`splitting`、
+`persisting`、`analyzing`、`publishing`、`updating`、`retrying`、`deleting`、
+`notifying`、`finished`。
+
+如果提供 `callback_url`，系统在任务进入 `done` 或 `failed` 后以 `POST JSON`
+发送任务快照（不重复发送 `callback_url`），并附带 `X-Assets-Task-Id`。回调失败
+会指数退避重试，最多 5 次；回调失败不会回滚已经完成的业务操作。调用方仍应
+支持用 `task_id` 主动查询，不得只依赖一次回调。
+
+## 6. 素材查询
+
+### `POST /api/v1/assets/query`
+
+该接口统一素材浏览、游标分页、标签统计和语义搜索。
+请求 `{}` 即按默认公共作用域浏览第一页。
+
+```json
+{
+  "query": "白色背景下的橙色产品静物",
+  "keywords": ["橙子", "白色背景"],
+  "filter": {
+    "user_scope": { "mode": "user", "user_id": "user_123" },
+    "media_types": ["image"],
+    "statuses": ["done"],
+    "review_statuses": ["published"],
+    "tags": [{ "category": "object", "value": "橙子" }]
+  },
+  "cursor": null,
+  "limit": 20,
+  "include_tag_statistics": true
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `query` | `string?` | 1–1,000 字符；存在时执行描述语义搜索。 |
+| `keywords` | `string[]?` | 最多 10 项，每项 1–64 字符；用于标签候选粗筛。 |
+| `filter.user_scope` | `UserScope` | 默认 `{ "mode": "public" }`。 |
+| `filter.media_types` | `("image"\|"video")[]?` | 最多 2 项。 |
+| `filter.statuses` | `TaskStatus[]?` | 最多 4 项。 |
+| `filter.review_statuses` | `ReviewStatus[]?` | `pending_review`、`published`、`deleted`，最多 3 项。 |
+| `filter.tags` | `{category,value}[]?` | 受控标签条件，最多 20 项。 |
+| `cursor` | `string \| null` | 上一页返回的不可解析游标；首页传 `null`。 |
+| `limit` | `integer` | 1–100，默认 20。 |
+| `include_tag_statistics` | `boolean` | 默认 `true`。 |
+
+`UserScope` 语义：
+
+- `{ "mode": "public" }`：仅 `user_id IS NULL` 的公共素材。
+- `{ "mode": "user", "user_id": "..." }`：仅该用户的个人素材。
+- `{ "mode": "all" }`：公共素材和所有用户素材。
+- `{ "mode": "exclude_user", "user_id": "..." }`：公共素材和除指定用户外的素材。
+
+成功响应包含 `items`、`next_cursor`、`has_more` 和可为 `null` 的
+`tag_statistics`。素材摘要字段全部为 `snake_case`；视频切片会返回
+`parent_video_id` 和 `segment_index`。
+
+| 素材摘要字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `asset_id` | `string(uuid)` | 素材 ID。 |
+| `parent_video_id` | `string(uuid) \| null` | 视频切片所属父视频；图片为 `null`。 |
+| `segment_index` | `integer \| null` | 子视频的零基序号；图片为 `null`。 |
+| `user_id` | `string \| null` | 个人归属；`null` 表示公共素材。 |
+| `name` / `description` | `string` | 素材名称和最终描述。 |
+| `media_type` | `image\|video` | 媒体类型；`video` 指子视频切片。 |
+| `status` | `queued\|running\|done\|failed` | 素材处理状态的 v1 表示。 |
+| `review_status` | `pending_review\|published\|deleted` | 审核/发布状态。 |
+| `tags` | `Tag[]` | 分类、值、来源和可选置信度。 |
+| `media_url` | `string` | 已附带必要用户作用域的媒体相对 URL。 |
+| `created_at` / `updated_at` | `string(date-time)` | 上海时区 ISO 8601 时间。 |
+| `search_score` / `semantic_score` | `number?` | 仅检索命中时可能出现的排序诊断分。 |
+
+### `GET /api/v1/assets/{asset_id}`
+
+获取素材详情。查询参数 `user_id` 可选：填写时只读该用户素材；省略或空值时
+只读公共素材。不接受 `all` 作用域，避免单资源读取绕过归属边界。
+
+除摘要字段外，详情包含 `original_filename`、`mime_type`、`size_bytes`、
+`auto_publish`、`failure` 和 `analysis`。API 边界会把模型内部字段统一转换为
+`snake_case`：图片 OCR 使用 `unavailable_reason`；视频使用
+`visual_segments`、`key_moments`，时间段使用 `start_seconds` 和
+`end_seconds`。
+
+图片 `analysis` 包含 `kind`、`description`、分类 `tags` 和 `ocr`。视频
+`analysis` 包含 `kind`、`description`、`topics`、分类 `tags`、
+`visual_segments`、`key_moments` 和 `timeline`；这些分析只属于子视频，父视频
+没有详情接口和分析结果。
+
+## 7. 异步素材变更
+
+以下接口均返回 `202 Accepted` 和 `TaskAccepted`，并通过响应头 `Location` 指向
+`/api/v1/tasks/{task_id}`。请求可带 `callback_url`。
+
+### `PATCH /api/v1/assets/{asset_id}`
+
+整体替换名称、描述和人工标签：
+
+```json
+{
+  "user_id": "user_123",
+  "callback_url": null,
+  "name": "产品主视觉",
+  "description": "人工确认后的描述。",
+  "tags": [
+    { "category": "scene", "value": "白色背景" },
+    { "category": "object", "value": "橙子" }
+  ]
+}
+```
+
+`name` 为 1–255 字符，`description` 最长 10,000 字符，`tags` 最多 100 项；
+标签分类最长 64 字符、值最长 128 字符。
+
+### `POST /api/v1/assets/{asset_id}/publish`
+
+请求体可为空，也可传 `{"user_id":"user_123","callback_url":null}`。只有分析
+成功的素材可以发布。
+
+### `POST /api/v1/assets/{asset_id}/retry`
+
+请求体同发布接口。只有分析失败的素材可以重试；重试任务通过统一任务接口
+跟踪新的分析结果。
+
+### `DELETE /api/v1/assets/{asset_id}`
+
+请求体是可选的 `MutationContext`：
+
+- 传入非空 `user_id`：只有归属于该用户的素材可操作。删除实际把
+  `user_id` 置为 `null`，素材随即成为公共素材；不删除 MySQL 素材记录、
+  ZOS 对象或 Chroma 向量。
+- 不传 `user_id`、传空字符串或 `null`：只允许删除公共素材。worker 会删除
+  Chroma 向量、ZOS 对象和 MySQL 素材记录。
+- 视频切片独立删除；删除同一父视频的最后一个切片时，同时回收父视频对象和
+  父视频记录。
+
+## 8. 用户资源占用与展示列表
+
+这两个接口都只处理指定 `user_id` 的个人素材，不会混入 `user_id IS NULL` 的
+公共素材。路径中的 `user_id` 会先进行 URL 解码，解码后必须为 1–191 个字符。
+
+### `GET /api/v1/users/{user_id}/storage-usage`
+
+使用 MySQL 中该用户每条素材记录的字节字段直接聚合，适合配额展示、容量告警
+和用户空间管理。返回：
+
+- `total_files`、`image_files`、`video_files`：素材条数；视频切片各算一条。
+- `image_bytes`：全部图片对象大小之和。
+- `video_bytes`：全部视频对象加各自第一帧 JPEG 对象大小之和。
+- `total_bytes`：`image_bytes + video_bytes`。
+- `items`：逐素材的 `asset_id`、`name`、`media_type`、`media_bytes`、
+  `thumbnail_bytes` 和 `total_bytes`；图片的 `thumbnail_bytes` 为 0。
+
+该统计不读取或下载 ZOS 文件；数值来自已持久化并登记在 MySQL 的对象元数据。
+
+### `GET /api/v1/users/{user_id}/media`
+
+查询参数 `cursor` 可选，`limit` 为 1–100、默认 20。响应包含 `items`、
+`next_cursor` 和 `has_more`：
+
+- 图片项返回 `media_url`，可直接作为 `<img src>`。
+- 视频项返回第一帧 `thumbnail_url` 和视频 `media_url`。首帧在视频入库时即
+  作为独立 JPEG 对象持久化到 ZOS 并在 MySQL 关联，不会在列表请求时临时抽帧，
+  也不会返回 base64。列表先把
+  `thumbnail_url` 用作 `<img src>`；用户点击播放后，用 `media_url` 替换为
+  `<video src>` 并开始播放。
+- 每项同时返回 `asset_id`、`name`、`media_type`、`size_bytes` 和上海时区
+  `created_at`；视频还返回 `thumbnail_bytes`。
+
+列表接口无需鉴权。媒体 URL 是带 `user_id` 查询参数的绝对直链（以当前请求的
+origin 为主机），不含 base64、密钥、签名或过期时间，可直接用于 `<img>` 和
+`<video>`。`user_id` 只限定数据范围，不提供身份认证能力。
+
+## 9. 媒体读取
+
+### `GET /api/v1/media/{asset_id}`
+
+该接口无需鉴权 Header。查询参数：
+
+- `user_id`：与详情接口相同；省略表示公共素材。
+- `download=1`：使用原始文件名作为附件下载；否则内联展示。
+
+支持单段 HTTP Range：`bytes=start-end`、`bytes=start-`、`bytes=-suffix`。
+
+- `200 OK`：完整对象。
+- `206 Partial Content`：部分对象，包含 `Content-Range`。
+- `416 Range Not Satisfiable`：范围无效，返回 `Content-Range: bytes */<size>`。
+- `409 Conflict`：媒体尚未完成校验，暂不可读取。
+
+响应包括 `Content-Type`、`Content-Length`、`Accept-Ranges: bytes`、
+`Content-Disposition`、`X-Content-Type-Options: nosniff`。持久化素材直接从 ZOS
+流式读取，不依赖本地 staging 文件。
+
+### `GET /api/v1/media/{asset_id}/thumbnail`
+
+读取视频切片持久化的第一帧 JPEG，支持与视频相同的单段 Range 语义。页面展示
+直接使用用户媒体列表返回的 `thumbnail_url`，点击播放后切换到对应
+`media_url`。
+
+## 10. OpenAPI
+
+`GET /api/v1/openapi` 公开返回 OpenAPI 3.1 YAML。文档页面可使用该接口加载
+定义；所有业务端点同样无需应用层鉴权。浏览器访问 `/docs` 可打开 Swagger UI，
+原 `/api-docs` 路径继续保留。

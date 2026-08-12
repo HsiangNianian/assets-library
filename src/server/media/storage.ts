@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { loadConfig } from "@/server/config";
@@ -53,19 +54,32 @@ export function storeVideoFrames(
 ) {
   const originalPath = resolveMediaPath(originalRelativePath);
   const frameDirectory = path.join(path.dirname(originalPath), "frames");
-  fs.mkdirSync(frameDirectory, { recursive: true });
-  const frames = uploads.map((upload, index) => {
-    const filename = `frame-${String(index + 1).padStart(2, "0")}.jpg`;
-    fs.renameSync(upload.temporaryPath, path.join(frameDirectory, filename));
-    return { filename, timestampSeconds: upload.timestampSeconds };
-  });
-  const manifest = {
-    durationSeconds: metadata.durationSeconds,
-    frames,
-  } satisfies VideoFrameManifest;
-  const temporaryManifest = path.join(frameDirectory, "manifest.json.tmp");
-  fs.writeFileSync(temporaryManifest, JSON.stringify(manifest));
-  fs.renameSync(temporaryManifest, path.join(frameDirectory, "manifest.json"));
+  const stagingDirectory = `${frameDirectory}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.mkdirSync(stagingDirectory, { recursive: true });
+    const frames = uploads.map((upload, index) => {
+      const filename = `frame-${String(index + 1).padStart(2, "0")}.jpg`;
+      fs.renameSync(upload.temporaryPath, path.join(stagingDirectory, filename));
+      return { filename, timestampSeconds: upload.timestampSeconds };
+    });
+    const manifest = {
+      durationSeconds: metadata.durationSeconds,
+      frames,
+    } satisfies VideoFrameManifest;
+    fs.writeFileSync(
+      path.join(stagingDirectory, "manifest.json"),
+      JSON.stringify(manifest),
+    );
+    fs.rmSync(frameDirectory, { recursive: true, force: true });
+    fs.renameSync(stagingDirectory, frameDirectory);
+  } catch {
+    throw new AppError("storage_error", "视频关键帧保存失败，请重试。", 500);
+  } finally {
+    fs.rmSync(stagingDirectory, { recursive: true, force: true });
+    for (const upload of uploads) {
+      fs.rmSync(upload.temporaryPath, { force: true });
+    }
+  }
 }
 
 export function readVideoFrames(

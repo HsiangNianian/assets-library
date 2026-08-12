@@ -19,7 +19,7 @@ export default function ApiDocsPage() {
           const mount = () => {
             if (!window.SwaggerUIBundle) return window.setTimeout(mount, 50);
             window.SwaggerUIBundle({
-              url: "/api/openapi",
+              url: "/api/v1/openapi",
               dom_id: "#swagger-ui",
               deepLinking: true,
               persistAuthorization: true,
