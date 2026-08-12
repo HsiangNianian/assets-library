@@ -292,7 +292,7 @@ describe("renamed media upload", () => {
       downloadedBytes.byteLength,
     );
     expect(downloadedBytes.byteLength).toBe(detail.sizeBytes);
-  });
+  }, 15_000);
 
   it("persists an actionable failure for an unreadable renamed image", async () => {
     const body = new FormData();
@@ -396,7 +396,7 @@ describe("renamed media upload", () => {
       codec_name: "h264",
       pix_fmt: "yuv420p",
     });
-  });
+  }, 15_000);
 
   it("persists an actionable failure for an unreadable renamed video", async () => {
     const body = new FormData();

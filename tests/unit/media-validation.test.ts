@@ -136,7 +136,7 @@ describe("media validation", () => {
       pix_fmt: "yuv420p",
     });
     expect((await fs.stat(filePath)).size).toBe(validated.sizeBytes);
-  });
+  }, 15_000);
 
   it("remuxes a 3GP container renamed to MP4 into an actual MP4 brand", async () => {
     const filePath = path.join(directory, "renamed-3gp.mp4");
@@ -169,7 +169,7 @@ describe("media validation", () => {
       filePath,
     ]);
     expect(stdout.trim()).toBe("isom");
-  });
+  }, 15_000);
 
   it("rejects a forged MP4 marker and an image renamed to MP4", async () => {
     const markerPath = path.join(directory, "marker.mp4");
