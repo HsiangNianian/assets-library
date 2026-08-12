@@ -12,8 +12,8 @@ describe("complete asset processing flow", () => {
     directory = await fs.mkdtemp(path.join(os.tmpdir(), "asset-flow-"));
     process.env.DATABASE_PATH = path.join(directory, "assets.db");
     process.env.MEDIA_ROOT = path.join(directory, "media");
-    process.env.MODEL_PROTOCOL = "openai_chat_completions";
-    process.env.MODEL_NAME = "test-model";
+    process.env.VLM_PROTOCOL = "openai_chat_completions";
+    process.env.VLM_NAME = "test-model";
     const { initializeDatabase } = await import("@/server/db/migrations");
     initializeDatabase(process.env.DATABASE_PATH).sqlite.close();
   });
