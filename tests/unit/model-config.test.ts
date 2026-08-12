@@ -26,6 +26,91 @@ describe("model configuration", () => {
       name: undefined,
       requestOptions: { enableThinking: null },
     });
+    expect(config.models.vlmCandidates).toHaveLength(1);
+    expect(config.models.llmCandidates).toEqual([]);
+  });
+
+  it("parses ordered VLM candidates and removes exact duplicates", () => {
+    const config = loadConfig({
+      VLM_BASE_URL: "https://models.example/v1",
+      VLM_NAME: "qwen3.7-plus",
+      VLM_FALLBACK_NAMES:
+        " kimi-k2.5, qwen3.7-plus, ,Qwythos,kimi-k2.5,qwythos ",
+      VLM_ENABLE_THINKING: "false",
+    });
+
+    expect(config.models.vlmCandidates.map((model) => model.name)).toEqual([
+      "qwen3.7-plus",
+      "kimi-k2.5",
+      "Qwythos",
+      "qwythos",
+    ]);
+    expect(
+      config.models.vlmCandidates.map(
+        (model) => model.requestOptions.enableThinking,
+      ),
+    ).toEqual([false, false, false, false]);
+  });
+
+  it("builds LLM candidates with the inherited endpoint and explicit thinking", () => {
+    const config = loadConfig({
+      VLM_BASE_URL: "https://models.example/v1",
+      VLM_API_KEY: "shared-key",
+      VLM_NAME: "qwen3.7-plus",
+      LLM_NAME: "Qwythos",
+      LLM_FALLBACK_NAMES: "kimi-k2.5",
+      LLM_ENABLE_THINKING: "false",
+    });
+
+    expect(config.models.llmCandidates).toEqual([
+      expect.objectContaining({
+        name: "Qwythos",
+        baseUrl: "https://models.example/v1",
+        apiKey: "shared-key",
+        requestOptions: { enableThinking: false },
+      }),
+      expect.objectContaining({
+        name: "kimi-k2.5",
+        baseUrl: "https://models.example/v1",
+        apiKey: "shared-key",
+        requestOptions: { enableThinking: false },
+      }),
+    ]);
+  });
+
+  it("applies model-family thinking defaults to each candidate", () => {
+    const config = loadConfig({
+      VLM_BASE_URL: "https://models.example/v1",
+      VLM_NAME: "vision-model",
+      VLM_FALLBACK_NAMES: "qwen3.7-plus",
+    });
+
+    expect(
+      config.models.vlmCandidates.map((model) => ({
+        name: model.name,
+        enableThinking: model.requestOptions.enableThinking,
+      })),
+    ).toEqual([
+      { name: "vision-model", enableThinking: null },
+      { name: "qwen3.7-plus", enableThinking: false },
+    ]);
+  });
+
+  it("rejects fallback-only and oversized candidate configurations", () => {
+    expect(() =>
+      loadConfig({
+        VLM_BASE_URL: "https://models.example/v1",
+        VLM_FALLBACK_NAMES: "kimi-k2.5",
+      }),
+    ).toThrow(/VLM_NAME/);
+    expect(() =>
+      loadConfig({
+        VLM_BASE_URL: "https://models.example/v1",
+        VLM_NAME: "model-1",
+        VLM_FALLBACK_NAMES:
+          "model-2,model-3,model-4,model-5,model-6",
+      }),
+    ).toThrow(/at most 5/);
   });
 
   it("keeps VLM and LLM targets independent", () => {
