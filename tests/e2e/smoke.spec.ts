@@ -36,7 +36,7 @@ test("overview and upload pages expose the MVP scope", async ({ page }) => {
   ).toHaveCount(0);
   await page.getByRole("link", { name: /上传素材/ }).click();
   await expect(page.getByRole("heading", { name: "上传素材" })).toBeVisible();
-  await expect(page.getByText(/自动提取 1–5 张关键帧/)).toBeVisible();
+  await expect(page.getByText(/提取 1–5 张关键帧/)).toBeVisible();
   await expect(page.getByText(/支持一次选择多个本地素材并逐个上传/)).toBeVisible();
   await expect(page.locator('input[type="file"]')).toHaveAttribute(
     "accept",
@@ -119,10 +119,75 @@ test("submits every selected asset as an independent upload", async ({
   const firstItem = page
     .getByRole("listitem")
     .filter({ hasText: "one.png" });
-  await firstItem.hover();
   await expect(
     firstItem.getByText(
       "无法获取处理状态（HTTP 503），请前往素材概览查看。",
     ),
+  ).toBeVisible();
+});
+
+test("shows an asynchronous media validation error without requiring hover", async ({
+  page,
+}) => {
+  const failureMessage =
+    "图片已损坏、无法读取，或不是可转换的 JPEG、PNG、WebP 图片。";
+  await page.route("**/api/uploads**", async (route) => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if (
+      request.method() === "POST" &&
+      pathname === "/api/uploads/images"
+    ) {
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({
+          uploadId: "00000000-0000-4000-8000-000000000007",
+          assetId: "10000000-0000-4000-8000-000000000007",
+          mediaType: "image",
+          processingStatus: "queued",
+          reviewStatus: "pending_review",
+          progressPercent: 10,
+          failureCode: null,
+          failureMessage: null,
+        }),
+      });
+      return;
+    }
+    if (request.method() === "GET" && pathname.startsWith("/api/uploads/")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          uploadId: "00000000-0000-4000-8000-000000000007",
+          assetId: "10000000-0000-4000-8000-000000000007",
+          mediaType: "image",
+          processingStatus: "failed",
+          reviewStatus: "pending_review",
+          progressPercent: 100,
+          failureCode: "corrupt_file",
+          failureMessage,
+        }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto("/upload");
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "corrupt.png",
+    mimeType: "image/png",
+    buffer: Buffer.from("not an image"),
+  });
+  await page.getByRole("button", { name: "开始上传" }).click();
+
+  const item = page.getByRole("listitem").filter({ hasText: "corrupt.png" });
+  await expect(
+    item.getByText("上传或处理失败", { exact: true }),
+  ).toBeVisible();
+  await expect(item.getByRole("alert")).toHaveText(failureMessage);
+  await expect(
+    page.getByText("1 个素材上传或处理失败，请查看原因。"),
   ).toBeVisible();
 });

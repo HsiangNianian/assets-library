@@ -9,8 +9,9 @@ export default function UploadPage() {
         </p>
         <h1 className="text-3xl font-bold tracking-tight">上传素材</h1>
         <p className="mt-3 text-slate-600">
-          支持一次选择多个本地素材并逐个上传。视频会自动提取 1–5
-          张关键帧，仅分析画面；第一阶段不支持音频、URL 上传和转码。
+          支持一次选择多个本地素材并逐个上传。系统会按文件扩展名转换图片，
+          并把可解码的视频转换为 H.264 MP4，再自动提取 1–5
+          张关键帧分析画面。
         </p>
       </div>
       <UploadForm />

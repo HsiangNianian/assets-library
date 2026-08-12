@@ -10,6 +10,7 @@ import {
   removeAssetFiles,
   temporaryUploadPath,
 } from "@/server/media/storage";
+import { targetFormatFromFilename } from "@/server/media/target-format";
 import { createAsset } from "@/server/repositories/assets";
 import type { MediaType } from "@/shared/contracts";
 
@@ -132,29 +133,20 @@ function parseMultipart(
 
 function uploadExtension(
   filename: string,
-  declaredMime: string,
   expectedMediaType: MediaType,
 ) {
-  const extension = path.extname(filename).toLowerCase();
+  const target = targetFormatFromFilename(filename);
+  if (target?.mediaType === expectedMediaType) return target;
   if (expectedMediaType === "video") {
-    if (extension !== ".mp4" || declaredMime !== "video/mp4") {
-      throw new AppError(
-        "unsupported_media_type",
-        "视频接口仅接受 H.264 MP4 视频。",
-      );
-    }
-    return extension;
+    throw new AppError(
+      "unsupported_media_type",
+      "视频文件名必须以 .mp4 结尾；后台会验证内容并转换为 H.264 MP4。",
+    );
   }
-  const imageTypes = new Map([
-    [".jpg", "image/jpeg"],
-    [".jpeg", "image/jpeg"],
-    [".png", "image/png"],
-    [".webp", "image/webp"],
-  ]);
-  if (imageTypes.get(extension) !== declaredMime) {
-    throw new AppError("unsupported_media_type", "图片接口仅接受 JPEG、PNG 、jpg或 WebP 图片。");
-  }
-  return extension;
+  throw new AppError(
+    "unsupported_media_type",
+    "图片文件名必须以 .jpg、.jpeg、.png 或 .webp 结尾。",
+  );
 }
 
 async function handleUpload(request: Request, expectedMediaType: MediaType) {
@@ -168,18 +160,18 @@ async function handleUpload(request: Request, expectedMediaType: MediaType) {
         ? config.MAX_IMAGE_BYTES
         : config.MAX_VIDEO_BYTES,
     );
-    const extension = uploadExtension(
-      parsed.filename,
-      parsed.mimeType,
-      expectedMediaType,
-    );
+    const target = uploadExtension(parsed.filename, expectedMediaType);
     const assetId = crypto.randomUUID();
     const uploadId = crypto.randomUUID();
-    storedPath = moveIntoAssetStorage(parsed.temporaryPath, assetId, extension);
+    storedPath = moveIntoAssetStorage(
+      parsed.temporaryPath,
+      assetId,
+      target.extension,
+    );
     const name = path.basename(parsed.filename, path.extname(parsed.filename)).trim() || "未命名素材";
     const status = createAsset({
       assetId, uploadId, name: name.slice(0, 255), originalFilename: parsed.filename,
-      originalPath: storedPath, mimeType: parsed.mimeType, declaredMime: parsed.mimeType,
+      originalPath: storedPath, mimeType: target.mimeType, declaredMime: parsed.mimeType,
       mediaType: expectedMediaType, sizeBytes: parsed.sizeBytes, directPublish: parsed.directPublish,
     });
     return Response.json(status, { status: 202 });
