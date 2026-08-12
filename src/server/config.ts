@@ -8,6 +8,9 @@ const modelProtocolSchema = z.enum([
 const optionalBooleanSchema = z
   .union([z.enum(["true", "false"]), z.literal("")])
   .optional();
+const MODEL_FAMILY_THINKING_DEFAULTS = [
+  { namePattern: /^qwen3\.[5-9]/i, enableThinking: false },
+] as const;
 
 export type ModelProtocol = z.infer<typeof modelProtocolSchema>;
 export type ModelRole = "vlm" | "llm";
@@ -26,6 +29,7 @@ export type ModelTarget = ModelTargetBase &
     | { configured: true; baseUrl: string; name: string }
     | { configured: false; baseUrl?: string; name?: string }
   );
+type ConfiguredModelTarget = Extract<ModelTarget, { configured: true }>;
 
 const envSchema = z.object({
   DATABASE_PATH: z.string().default("./data/assets.db"),
@@ -61,13 +65,29 @@ function optionalValue(value: string | undefined) {
   return value?.trim() || undefined;
 }
 
+function defaultThinkingOption(modelName: string | undefined) {
+  return (
+    MODEL_FAMILY_THINKING_DEFAULTS.find(({ namePattern }) =>
+      namePattern.test(modelName ?? ""),
+    )?.enableThinking ?? null
+  );
+}
+
 function thinkingOption(
   value: string | undefined,
   modelName: string | undefined,
 ) {
   const normalizedValue = optionalValue(value);
   if (normalizedValue !== undefined) return normalizedValue === "true";
-  return /^qwen3\.[5-9]/i.test(modelName ?? "") ? false : null;
+  return defaultThinkingOption(modelName);
+}
+
+function firstConfiguredModelTarget(
+  targets: readonly ModelTarget[],
+): ConfiguredModelTarget | undefined {
+  return targets.find(
+    (target): target is ConfiguredModelTarget => target.configured,
+  );
 }
 
 function modelTarget(
@@ -125,15 +145,19 @@ export function loadConfig(
     parsed.LLM_NAME,
     parsed.LLM_ENABLE_THINKING,
   );
+  const embeddingFallbackTarget = firstConfiguredModelTarget([vlm, llm]);
+  const embeddingBaseUrl =
+    optionalValue(parsed.EMBEDDING_BASE_URL)?.replace(/\/$/, "") ??
+    embeddingFallbackTarget?.baseUrl;
+  const embeddingApiKey =
+    optionalValue(parsed.EMBEDDING_API_KEY) ?? embeddingFallbackTarget?.apiKey;
   return {
     ...parsed,
     databasePath: path.resolve(parsed.DATABASE_PATH),
     mediaRoot: path.resolve(parsed.MEDIA_ROOT),
     models: { vlm, llm },
-    embeddingBaseUrl: parsed.EMBEDDING_BASE_URL || vlm.baseUrl,
-    embeddingApiKey: optionalValue(parsed.EMBEDDING_API_KEY) ?? vlm.apiKey,
-    embeddingConfigured: Boolean(
-      (parsed.EMBEDDING_BASE_URL || vlm.baseUrl) && parsed.EMBEDDING_MODEL,
-    ),
+    embeddingBaseUrl,
+    embeddingApiKey,
+    embeddingConfigured: Boolean(embeddingBaseUrl && parsed.EMBEDDING_MODEL),
   };
 }
