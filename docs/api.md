@@ -24,7 +24,7 @@
 
 ### `POST /api/uploads/images`
 
-上传一张图片。文件流式落盘并入队后返回 `202`；内容校验、分析与向量索引由后台 worker 异步执行。
+上传一张图片。文件名扩展名决定最终 JPEG、PNG 或 WebP 格式；若实际内容是另一种受支持图片格式，worker 会在校验阶段执行真实转换。文件流式落盘并入队后返回 `202`；内容校验、分析与向量索引由后台 worker 异步执行。
 
 请求类型：`multipart/form-data`
 
@@ -37,7 +37,7 @@
 
 ### `POST /api/uploads/videos`
 
-上传一个 H.264 MP4 视频。文件流式落盘并入队后返回 `202`；worker 随后校验 MP4/H.264 内容，使用服务端 FFmpeg 均匀抽取 1–5 张 JPEG 关键帧，再调用模型分析。
+上传一个文件名以 `.mp4` 结尾的视频。文件流式落盘并入队后返回 `202`；worker 随后验证它是可完整解码的自包含视频，并在需要时转换为 H.264/yuv420p MP4，然后使用服务端 FFmpeg 均匀抽取 1–5 张 JPEG 关键帧，再调用模型分析。浏览器声明的 MIME 不决定目标格式，只作为上传审计信息保存。
 
 视频示例：
 
@@ -53,7 +53,7 @@ curl -X POST http://localhost:3000/api/uploads/videos \
 {
   "uploadId": "0bd9d30b-4f29-4ab8-8d0c-9af5b3e6f6e6",
   "assetId": "3c3eb3fd-e239-4d85-8a2c-e99f2b175c4a",
-  "mediaType": "image",
+  "mediaType": "video",
   "processingStatus": "queued",
   "reviewStatus": "pending_review",
   "progressPercent": 10,
@@ -68,7 +68,7 @@ curl -X POST http://localhost:3000/api/uploads/videos \
 
 成功响应：`200 OK`，字段与上传接口响应相同。
 
-`processingStatus` 可能为：`queued`、`validating`、`analyzing`、`completed`、`failed`。`validating` 阶段执行图片签名/解码或 MP4/H.264 校验；视频关键帧也在此阶段提取。
+`processingStatus` 可能为：`queued`、`validating`、`analyzing`、`completed`、`failed`。`validating` 阶段执行图片签名/解码和目标格式转换，或执行视频探测、完整解码、H.264 MP4 归一化及关键帧提取。失败响应会携带稳定错误码和可操作说明。
 
 ## 素材查询
 

@@ -8,10 +8,10 @@
 | UI | Tailwind CSS、shadcn/ui 组件模式 |
 | 包管理 | pnpm |
 | 数据 | Drizzle ORM、better-sqlite3、SQLite WAL |
-| 媒体 | worker 使用 FFmpeg 提取视频关键帧；本地文件系统保存原文件和帧；不转码 |
+| 媒体 | worker 使用 Sharp/FFmpeg 按目标扩展名正规化媒体并提取视频关键帧；本地文件系统保存正规化文件和帧 |
 | 后台任务 | 独立 TypeScript worker 事务轮询 SQLite |
 | 模型 | OpenAI Chat Completions / Responses 兼容 HTTP 适配器 |
-| 校验 | Zod、文件签名、Sharp 图片元数据、MP4/H.264 结构标记 |
+| 校验 | Zod、文件签名、Sharp 图片解码、ffprobe 容器探测、FFmpeg 完整视频解码与输出复验 |
 | 测试 | Vitest、Playwright、模型 HTTP 测试替身 |
 
 ## 结构
@@ -34,9 +34,9 @@ src/
 
 ```text
 浏览器通过 XHR multipart 流式上传单个原文件
-  → 扩展名/声明 MIME/大小检查 → 临时文件 → 原子移动
+  → 目标扩展名/大小检查（声明 MIME 仅审计）→ 临时文件 → 原子移动
   → SQLite 素材与任务 → 独立 worker
-  → 内容校验；视频按分位点提取 1–5 帧 → 模型分析
+  → 内容校验与目标格式原子转换；视频按分位点提取 1–5 帧 → 模型分析
   → 当前候选重试/Zod 校验一次修正 → 按顺序切换 VLM 候选
   → 保存实际成功模型 → 待审核或直接入库
   → 概览、详情、编辑、发布、重试、删除
@@ -55,7 +55,7 @@ VLM 由 `VLM_NAME` 和按优先级排列的 `VLM_FALLBACK_NAMES` 组成候选链
 - Web 与 worker 是同一仓库的两个长期 Node 进程，共享数据库和媒体目录。
 - worker 每 30 秒更新运行任务心跳并扫描失联任务；超过两分钟没有心跳的任务重新排队。
 - 不依赖 Redis、消息队列或对象存储；视频抽帧需要服务端 FFmpeg/ffprobe。
-- worker 执行关键帧采样，只解码画面，不转码原视频或分析音轨。
+- worker 将媒体转换为文件名扩展名指定的受支持格式；视频统一为 H.264/yuv420p MP4，并只分析画面、不分析音轨。
 - 关键帧保存在素材 UUID 目录中，分析重试复用原帧，清理任务删除整个素材目录。
 - 删除先软删除，再由 worker 清理素材目录。
 - 模型密钥及原始模型响应不得写入日志或数据库。

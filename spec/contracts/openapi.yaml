@@ -25,7 +25,7 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
   /api/uploads/videos:
     post:
-      summary: 上传 H.264 MP4 视频并异步校验、提取关键帧
+      summary: 上传 MP4 目标视频并异步正规化、提取关键帧
       requestBody:
         required: true
         content:
@@ -38,7 +38,7 @@ paths:
                 directPublish: { type: boolean }
       responses:
         "202":
-          description: 视频已落盘入队；worker 将校验内容并在服务端提取关键帧
+          description: 视频已落盘入队；worker 将校验并转换为 H.264/yuv420p MP4，再在服务端提取关键帧
           content:
             application/json:
               schema: { $ref: "#/components/schemas/UploadStatus" }
@@ -116,7 +116,7 @@ paths:
         "202": { description: 已重新入队的处理状态 }
   /api/media/{assetId}:
     get:
-      summary: 以支持 Range 的方式流式返回原始媒体
+      summary: 以支持 Range 的方式流式返回正规化后的媒体
       parameters:
         - { name: assetId, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: download, in: query, description: 设为 1 时，以原始文件名作为附件下载, schema: { type: string, enum: ["1"] } }
