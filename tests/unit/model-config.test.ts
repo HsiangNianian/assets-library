@@ -86,4 +86,41 @@ describe("model configuration", () => {
     expect(config.models.llm.requestOptions.enableThinking).toBeNull();
     expect(config.models.llm.apiKey).toBe("shared-key");
   });
+
+  it("applies model-family thinking defaults unless explicitly overridden", () => {
+    const config = loadConfig({
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "qwen3.7-plus",
+      LLM_BASE_URL: "https://text.example/v1",
+      LLM_NAME: "qwen3.7-plus",
+      LLM_ENABLE_THINKING: "true",
+    });
+
+    expect(config.models.vlm.requestOptions.enableThinking).toBe(false);
+    expect(config.models.llm.requestOptions.enableThinking).toBe(true);
+  });
+
+  it("uses the first configured model target as the embedding fallback", () => {
+    const llmOnly = loadConfig({
+      LLM_BASE_URL: "https://text.example/v1",
+      LLM_API_KEY: "text-key",
+      LLM_NAME: "text-model",
+      EMBEDDING_MODEL: "embedding-model",
+    });
+    const bothTargets = loadConfig({
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_API_KEY: "vision-key",
+      VLM_NAME: "vision-model",
+      LLM_BASE_URL: "https://text.example/v1",
+      LLM_API_KEY: "text-key",
+      LLM_NAME: "text-model",
+      EMBEDDING_MODEL: "embedding-model",
+    });
+
+    expect(llmOnly.embeddingBaseUrl).toBe("https://text.example/v1");
+    expect(llmOnly.embeddingApiKey).toBe("text-key");
+    expect(llmOnly.embeddingConfigured).toBe(true);
+    expect(bothTargets.embeddingBaseUrl).toBe("https://vision.example/v1");
+    expect(bothTargets.embeddingApiKey).toBe("vision-key");
+  });
 });
