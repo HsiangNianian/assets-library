@@ -93,8 +93,9 @@ Responses 协议或禁用视频能力时，视频任务会明确失败为 `model
 `/embeddings` 接口，并把向量持久化到本地 Chroma 的 `asset_analysis` collection。搜索关键词会用
 同一模型生成向量，语义命中与标签模糊匹配合并排序；Chroma 暂不可用时仍保留标签搜索。
 
-`docker compose up -d` 会启动持久化的 Chroma 服务。填写以下配置即可启用（`EMBEDDING_BASE_URL`
-留空时复用 `VLM_BASE_URL`；embedding 模型必须与查询阶段相同）：
+`docker compose up -d` 会启动持久化的 Chroma 服务。填写以下配置即可启用。`EMBEDDING_BASE_URL`
+和 `EMBEDDING_API_KEY` 留空时优先复用已配置的 VLM 端点和密钥；若 VLM 未配置，则复用
+LLM。embedding 模型必须与查询阶段相同：
 
 ```dotenv
 CHROMA_URL=http://127.0.0.1:8100
