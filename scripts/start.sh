@@ -40,7 +40,7 @@ if is_running "$CHROMA_PID_FILE"; then
   c_warn "Chroma 已在运行 (PID $(cat "$CHROMA_PID_FILE"))"
 else
   c_info "启动 Chroma @ 0.0.0.0:$CHROMA_PORT ..."
-  nohup uvx --from chromadb chroma run \
+  nohup env UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uvx --from chromadb chroma run \
     --path "$CHROMA_DIR" \
     --host 0.0.0.0 \
     --port "$CHROMA_PORT" \
