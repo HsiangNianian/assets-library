@@ -66,13 +66,11 @@ const phaseLabels: Record<UploadPhase, string> = {
   uploading: "正在上传",
   processing: "正在分析",
   completed: "分析完成",
-  failed: "处理失败",
+  failed: "上传或处理失败",
 };
 
 function isVideo(file: File) {
-  return (
-    file.type === "video/mp4" || file.name.toLocaleLowerCase().endsWith(".mp4")
-  );
+  return file.name.toLocaleLowerCase().endsWith(".mp4");
 }
 
 export function UploadForm() {
@@ -286,6 +284,7 @@ export function UploadForm() {
   };
 
   const queuedCount = items.filter((item) => item.phase === "queued").length;
+  const failedCount = items.filter((item) => item.phase === "failed").length;
 
   return (
     <Card>
@@ -327,7 +326,7 @@ export function UploadForm() {
                 拖放一个或多个文件到这里，或点击选择
               </h2>
               <p className="mt-2 text-sm text-slate-500">
-                JPEG / PNG / WebP ≤ 20 MB · H.264 MP4 ≤ 200 MB
+                JPEG / PNG / WebP ≤ 20 MB · MP4 视频 ≤ 200 MB
               </p>
             </>
           ) : (
@@ -364,6 +363,15 @@ export function UploadForm() {
                       <span className="min-w-0 flex-1 truncate text-sm font-medium">
                         {item.file.name}
                       </span>
+                      <span
+                        className={`shrink-0 text-xs ${
+                          item.phase === "failed"
+                            ? "font-medium text-red-600"
+                            : "text-slate-500"
+                        }`}
+                      >
+                        {phaseLabels[item.phase]}
+                      </span>
                       {item.phase === "queued" && (
                         <button
                           type="button"
@@ -375,6 +383,15 @@ export function UploadForm() {
                         </button>
                       )}
                     </div>
+                    {item.error && (
+                      <p
+                        role="alert"
+                        className="mt-2 flex items-start gap-1.5 rounded-lg bg-red-50 px-2.5 py-2 text-xs text-red-700"
+                      >
+                        <XCircle className="mt-0.5 size-3.5 shrink-0" />
+                        {item.error}
+                      </p>
+                    )}
 
                     <div
                       aria-label={`${item.file.name} 预览`}
@@ -399,7 +416,7 @@ export function UploadForm() {
                           />
                         )}
                       </div>
-                      <div className="mt-2 flex items-center justify-between gap-3 text-xs text-slate-500">
+                      <div className="mt-2 flex items-center gap-1.5 text-xs text-slate-500">
                         <span className="flex min-w-0 items-center gap-1.5">
                           {isVideo(item.file) ? (
                             <FileVideo2 className="size-3.5 shrink-0" />
@@ -408,7 +425,6 @@ export function UploadForm() {
                           )}
                           {(item.file.size / 1024 / 1024).toFixed(1)} MB
                         </span>
-                        <span>{phaseLabels[item.phase]}</span>
                       </div>
                       {(item.phase === "uploading" ||
                         item.phase === "processing") && (
@@ -418,12 +434,6 @@ export function UploadForm() {
                             style={{ width: `${item.progress}%` }}
                           />
                         </div>
-                      )}
-                      {item.error && (
-                        <p className="mt-2 flex items-start gap-1.5 text-xs text-red-600">
-                          <XCircle className="mt-0.5 size-3.5 shrink-0" />
-                          {item.error}
-                        </p>
                       )}
                       {item.status && (
                         <Link
@@ -470,9 +480,13 @@ export function UploadForm() {
           <p className="text-sm text-slate-500">
             {items.length === 0
               ? "可一次选择多个素材，系统会逐个提交。"
-              : queuedCount > 0
-                ? `还有 ${queuedCount} 个素材等待上传。`
-                : "所选素材均已提交，可在素材概览继续查看状态。"}
+              : failedCount > 0 && queuedCount > 0
+                ? `${failedCount} 个素材上传或处理失败；还有 ${queuedCount} 个等待上传。`
+                : failedCount > 0
+                  ? `${failedCount} 个素材上传或处理失败，请查看原因。`
+                : queuedCount > 0
+                  ? `还有 ${queuedCount} 个素材等待上传。`
+                  : "所选素材均已提交，可在素材概览继续查看状态。"}
           </p>
           <Button
             disabled={queuedCount === 0 || submitting}
