@@ -15,7 +15,7 @@ const videoAnalysis = {
   timeline: [{ startSeconds: 0, endSeconds: 3, summary: "完整片段" }],
   transcript: "不应进入正式结果",
 };
-const modelBaseUrl = process.env.MODEL_BASE_URL ?? "https://proxy.example/v1";
+const modelBaseUrl = process.env.VLM_BASE_URL ?? "https://proxy.example/v1";
 
 describe("model adapter", () => {
   afterEach(() => {
@@ -25,10 +25,10 @@ describe("model adapter", () => {
   it("normalizes a Chat Completions image response", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "asset-model-"));
     process.env.MEDIA_ROOT = root;
-    process.env.MODEL_PROTOCOL = "openai_chat_completions";
-    process.env.MODEL_BASE_URL = modelBaseUrl;
-    process.env.MODEL_API_KEY = "secret";
-    process.env.MODEL_NAME = "qwen3.7-plus";
+    process.env.VLM_PROTOCOL = "openai_chat_completions";
+    process.env.VLM_BASE_URL = modelBaseUrl;
+    process.env.VLM_API_KEY = "secret";
+    process.env.VLM_NAME = "qwen3.7-plus";
     await fs.mkdir(path.join(root, "a"));
     await fs.writeFile(path.join(root, "a", "original.png"), "image");
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -75,13 +75,76 @@ describe("model adapter", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  it("uses the VLM target without leaking LLM request options", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "asset-vlm-target-"));
+    const assetDirectory = path.join(root, "vlm");
+    await fs.mkdir(assetDirectory);
+    await fs.writeFile(path.join(assetDirectory, "original.png"), "image");
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_PROTOCOL: "openai_chat_completions",
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "qwen3.7-plus",
+      VLM_ENABLE_THINKING: "false",
+      LLM_PROTOCOL: "openai_responses",
+      LLM_BASE_URL: "https://text.example/v1",
+      LLM_API_KEY: "text-only-key",
+      LLM_NAME: "Qwythos",
+      LLM_ENABLE_THINKING: "true",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  kind: "image",
+                  description: "分组配置测试",
+                  tags: {
+                    scene: [],
+                    object: [],
+                    person: [],
+                    style: [],
+                    color_composition: [],
+                  },
+                  ocr: { text: null, unavailableReason: "无文字" },
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await new OpenAICompatibleAnalyzer(config).analyze({
+      assetId: "vlm",
+      mediaType: "image",
+      mimeType: "image/png",
+      relativePath: "vlm/original.png",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://vision.example/v1/chat/completions",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(request?.headers).toEqual({ "content-type": "application/json" });
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      model: "qwen3.7-plus",
+      enable_thinking: false,
+    });
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
   it("retries when model returns English tag values", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "asset-model-language-"));
     process.env.MEDIA_ROOT = root;
-    process.env.MODEL_PROTOCOL = "openai_chat_completions";
-    process.env.MODEL_BASE_URL = modelBaseUrl;
-    process.env.MODEL_API_KEY = "secret";
-    process.env.MODEL_NAME = "qwen3.7-plus";
+    process.env.VLM_PROTOCOL = "openai_chat_completions";
+    process.env.VLM_BASE_URL = modelBaseUrl;
+    process.env.VLM_API_KEY = "secret";
+    process.env.VLM_NAME = "qwen3.7-plus";
     await fs.mkdir(path.join(root, "language"));
     await fs.writeFile(path.join(root, "language", "original.png"), "image");
 
@@ -137,10 +200,10 @@ describe("model adapter", () => {
 
   it("fails video under the Responses protocol without fallback", async () => {
     const config = loadConfig({
-      MODEL_PROTOCOL: "openai_responses",
-      MODEL_BASE_URL: modelBaseUrl,
-      MODEL_API_KEY: "secret",
-      MODEL_NAME: "vision-model",
+      VLM_PROTOCOL: "openai_responses",
+      VLM_BASE_URL: modelBaseUrl,
+      VLM_API_KEY: "secret",
+      VLM_NAME: "vision-model",
     });
     await expect(
       new OpenAICompatibleAnalyzer(config).analyze({
@@ -172,11 +235,11 @@ describe("model adapter", () => {
     );
     const config = loadConfig({
       MEDIA_ROOT: root,
-      MODEL_PROTOCOL: "openai_chat_completions",
-      MODEL_BASE_URL: modelBaseUrl,
-      MODEL_API_KEY: "secret",
-      MODEL_NAME: "qwen3.7-plus",
-      MODEL_VIDEO_MODE: "frames",
+      VLM_PROTOCOL: "openai_chat_completions",
+      VLM_BASE_URL: modelBaseUrl,
+      VLM_API_KEY: "secret",
+      VLM_NAME: "qwen3.7-plus",
+      VLM_VIDEO_MODE: "frames",
     });
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
@@ -224,11 +287,11 @@ describe("model adapter", () => {
     await fs.writeFile(path.join(assetDirectory, "original.mp4"), "video");
     const config = loadConfig({
       MEDIA_ROOT: root,
-      MODEL_PROTOCOL: "openai_chat_completions",
-      MODEL_BASE_URL: "https://proxy.example/v1",
-      MODEL_API_KEY: "secret",
-      MODEL_NAME: "qwen3.7-plus",
-      MODEL_VIDEO_MODE: "frames",
+      VLM_PROTOCOL: "openai_chat_completions",
+      VLM_BASE_URL: "https://proxy.example/v1",
+      VLM_API_KEY: "secret",
+      VLM_NAME: "qwen3.7-plus",
+      VLM_VIDEO_MODE: "frames",
     });
 
     await expect(
@@ -244,11 +307,11 @@ describe("model adapter", () => {
 
   it("fails video when video analysis is disabled", async () => {
     const config = loadConfig({
-      MODEL_PROTOCOL: "openai_chat_completions",
-      MODEL_BASE_URL: "https://proxy.example/v1",
-      MODEL_API_KEY: "secret",
-      MODEL_NAME: "qwen3.7-plus",
-      MODEL_VIDEO_MODE: "disabled",
+      VLM_PROTOCOL: "openai_chat_completions",
+      VLM_BASE_URL: "https://proxy.example/v1",
+      VLM_API_KEY: "secret",
+      VLM_NAME: "qwen3.7-plus",
+      VLM_VIDEO_MODE: "disabled",
     });
 
     await expect(
@@ -268,10 +331,10 @@ describe("model adapter", () => {
     await fs.writeFile(path.join(assetDirectory, "original.webp"), "image");
     const config = loadConfig({
       MEDIA_ROOT: root,
-      MODEL_PROTOCOL: "openai_responses",
-      MODEL_BASE_URL: "https://proxy.example/v1",
-      MODEL_API_KEY: "secret",
-      MODEL_NAME: "vision-model",
+      VLM_PROTOCOL: "openai_responses",
+      VLM_BASE_URL: "https://proxy.example/v1",
+      VLM_API_KEY: "secret",
+      VLM_NAME: "vision-model",
     });
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
