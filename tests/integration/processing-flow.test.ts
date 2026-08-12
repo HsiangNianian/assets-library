@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import sharp from "sharp";
 import type { MultimodalAnalyzer } from "@/server/model/analyzer";
@@ -23,18 +24,15 @@ describe("complete asset processing flow", () => {
   });
 
   it("uploads, analyzes, edits, publishes, streams and deletes an image", async () => {
-    const [
-      storage,
-      validation,
-      repository,
-      processing,
-      media,
-    ] = await Promise.all([
+    const [storage, validation, repository, processing, media, database, schema] =
+      await Promise.all([
       import("@/server/media/storage"),
       import("@/server/media/validate"),
       import("@/server/repositories/assets"),
       import("@/server/services/processing"),
       import("@/server/media/response"),
+      import("@/server/db"),
+      import("@/server/db/schema"),
     ]);
 
     const temporaryPath = storage.temporaryUploadPath("flow-upload");
@@ -85,16 +83,22 @@ describe("complete asset processing flow", () => {
     const analyzer: MultimodalAnalyzer = {
       async analyze() {
         return {
-          kind: "image",
-          description: "一张青色的活动图片",
-          tags: {
-            scene: ["室内"],
-            object: ["海报"],
-            person: [],
-            style: ["简洁"],
-            color_composition: ["青色"],
+          result: {
+            kind: "image",
+            description: "一张青色的活动图片",
+            tags: {
+              scene: ["室内"],
+              object: ["海报"],
+              person: [],
+              style: ["简洁"],
+              color_composition: ["青色"],
+            },
+            ocr: { text: null, unavailableReason: "无文字" },
           },
-          ocr: { text: null, unavailableReason: "无文字" },
+          model: {
+            protocol: "openai_chat_completions",
+            name: "kimi-k2.5",
+          },
         };
       },
     };
@@ -106,6 +110,19 @@ describe("complete asset processing flow", () => {
     expect(detail.processingStatus).toBe("completed");
     expect(detail.reviewStatus).toBe("pending_review");
     expect(detail.tags.map((tag) => tag.value)).toContain("海报");
+    expect(
+      database.db
+        .select({
+          modelProtocol: schema.analysisResults.modelProtocol,
+          modelName: schema.analysisResults.modelName,
+        })
+        .from(schema.analysisResults)
+        .where(eq(schema.analysisResults.assetId, assetId))
+        .get(),
+    ).toEqual({
+      modelProtocol: "openai_chat_completions",
+      modelName: "kimi-k2.5",
+    });
 
     detail = repository.updateAssetMetadata(assetId, {
       name: "活动主视觉",
@@ -243,17 +260,23 @@ describe("complete asset processing flow", () => {
     const analyzer: MultimodalAnalyzer = {
       async analyze() {
         return {
-          kind: "video",
-          description: "产品演示视频",
-          topics: ["产品"],
-          tags: { scene: ["室内"], person: [], form: ["演示"] },
-          visualSegments: [
-            { startSeconds: 0, endSeconds: 4, summary: "展示产品外观" },
-          ],
-          keyMoments: [{ seconds: 2, summary: "出现产品名称" }],
-          timeline: [
-            { startSeconds: 0, endSeconds: 4, summary: "完成一次演示" },
-          ],
+          result: {
+            kind: "video",
+            description: "产品演示视频",
+            topics: ["产品"],
+            tags: { scene: ["室内"], person: [], form: ["演示"] },
+            visualSegments: [
+              { startSeconds: 0, endSeconds: 4, summary: "展示产品外观" },
+            ],
+            keyMoments: [{ seconds: 2, summary: "出现产品名称" }],
+            timeline: [
+              { startSeconds: 0, endSeconds: 4, summary: "完成一次演示" },
+            ],
+          },
+          model: {
+            protocol: "openai_chat_completions",
+            name: "Qwythos",
+          },
         };
       },
     };
@@ -280,7 +303,6 @@ describe("complete asset processing flow", () => {
       import("@/server/db"),
       import("@/server/db/schema"),
     ]);
-    const { eq } = await import("drizzle-orm");
     const assetId = crypto.randomUUID();
     const temporaryPath = storage.temporaryUploadPath("recovery-upload");
     await fs.writeFile(temporaryPath, "image");
