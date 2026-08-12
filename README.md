@@ -51,26 +51,31 @@ PORT=3100 npm run dev
 
 ## 模型配置
 
-设置 `MODEL_PROTOCOL` 为：
+当前图片和视频关键帧分析属于 VLM（视觉语言模型）任务。设置 `VLM_PROTOCOL` 为：
 
 - `openai_chat_completions`
 - `openai_responses`
 
-并配置 `MODEL_BASE_URL` 和 `MODEL_NAME`。兼容 NewAPI、百炼等第三方服务时使用其 OpenAI
-兼容 Base URL（通常以 `/v1` 结尾）。`MODEL_API_KEY` 是可选的：网关启用鉴权时填写
+并配置 `VLM_BASE_URL` 和 `VLM_NAME`。兼容 NewAPI、百炼等第三方服务时使用其 OpenAI
+兼容 Base URL（通常以 `/v1` 结尾）。`VLM_API_KEY` 是可选的：网关启用鉴权时填写
 NewAPI 令牌，网关关闭鉴权时可以留空；留空后请求不会发送 `Authorization` 请求头。
 
 `qwen3.7` 系列默认开启思考模式。素材结构化提取不需要长推理，建议关闭以降低等待时间：
 
 ```dotenv
-MODEL_ENABLE_THINKING=false
+VLM_ENABLE_THINKING=false
 ```
+
+`LLM_PROTOCOL`、`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_NAME` 和
+`LLM_ENABLE_THINKING` 构成独立的纯文本模型配置。`LLM_BASE_URL` 和 `LLM_API_KEY`
+留空时复用 VLM 的端点与密钥；当前业务尚未调用 LLM。每个模型组独立决定是否发送
+`enable_thinking`，不会把 VLM 的扩展参数透传给 LLM。
 
 视频分析使用 Chat Completions 的多图片输入。worker 按视频时长在服务端提取 1–5 张 JPEG 关键帧，并将关键帧及其时间点交给模型；原始 MP4 只用于存储和预览。配置：
 
 ```dotenv
-MODEL_VIDEO_MODE=frames
-MODEL_VIDEO_TIMEOUT_MS=300000
+VLM_VIDEO_MODE=frames
+VLM_VIDEO_TIMEOUT_MS=300000
 ```
 
 不超过 5 秒的视频每秒取一帧（向上取整，至少一帧），超过 5 秒的视频固定取五帧；时间点均为各等分区间的中点，因此长视频取 10%、30%、50%、70%、90% 位置。FFmpeg 以 JPEG 保存关键帧。视频大小不再影响模型传递策略，也不需要公网 URL。
@@ -89,7 +94,7 @@ Responses 协议或禁用视频能力时，视频任务会明确失败为 `model
 同一模型生成向量，语义命中与标签模糊匹配合并排序；Chroma 暂不可用时仍保留标签搜索。
 
 `docker compose up -d` 会启动持久化的 Chroma 服务。填写以下配置即可启用（`EMBEDDING_BASE_URL`
-留空时复用 `MODEL_BASE_URL`；embedding 模型必须与查询阶段相同）：
+留空时复用 `VLM_BASE_URL`；embedding 模型必须与查询阶段相同）：
 
 ```dotenv
 CHROMA_URL=http://127.0.0.1:8100
@@ -123,7 +128,7 @@ npm run start:worker
   cp .env.example .env
   ```
 
-  至少确认 `.env` 中的 `MODEL_PROTOCOL`、`MODEL_BASE_URL`、`MODEL_API_KEY`（如需要）和 `MODEL_NAME` 适用于你的模型服务。不要将 `.env` 提交到 Git 或打包进镜像。
+  至少确认 `.env` 中的 `VLM_PROTOCOL`、`VLM_BASE_URL`、`VLM_API_KEY`（如需要）和 `VLM_NAME` 适用于你的模型服务。不要将 `.env` 提交到 Git 或打包进镜像。
 
 ### 构建镜像
 
