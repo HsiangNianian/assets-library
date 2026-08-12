@@ -336,8 +336,8 @@ export async function processJob(
     persistAnalysis(
       job,
       result,
-      config.MODEL_PROTOCOL,
-      config.MODEL_NAME ?? "unknown",
+      config.models.vlm.protocol,
+      config.models.vlm.name ?? "unknown",
     );
   } catch (error) {
     if (job.type === "embed") {

@@ -41,9 +41,9 @@ src/
   → 概览、详情、编辑、发布、重试、删除
 ```
 
-视频模型输入只在 Chat Completions 且 `MODEL_VIDEO_MODE=frames` 时开启。worker 读取已持久化的 JPEG 关键帧，按时间点标注后作为多图片输入发送。Responses 或禁用模式以 `model_video_unsupported` 终止；关键帧缺失或无效则以 `video_frames_missing` 终止并允许重试。
+视频模型输入只在 Chat Completions 且 `VLM_VIDEO_MODE=frames` 时开启。worker 读取已持久化的 JPEG 关键帧，按时间点标注后作为多图片输入发送。Responses 或禁用模式以 `model_video_unsupported` 终止；关键帧缺失或无效则以 `video_frames_missing` 终止并允许重试。
 
-Qwen3.7 默认启用思考模式，但素材描述和标签提取属于直接结构化任务，因此通过 `MODEL_ENABLE_THINKING=false` 关闭，以减少推理等待和输出成本。非 Qwen 兼容端点未显式配置时不附加该扩展参数。
+Qwen3.7 默认启用思考模式，但素材描述和标签提取属于直接结构化任务，因此通过 `VLM_ENABLE_THINKING=false` 关闭，以减少推理等待和输出成本。VLM 与 LLM 独立配置该扩展参数，未显式配置时不跨模型组透传。
 
 概览查询以 `pending` / `published` 视图区分审核状态，使用数字页码和固定 `limit=8`。标签子查询只在 `published` 视图构造，避免通过页面或 API 检索未入库素材。
 

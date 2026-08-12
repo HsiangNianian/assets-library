@@ -30,8 +30,14 @@ async function main() {
       console.log(`Recovered ${recovered} stale processing job(s).`);
     }
   }, recoveryIntervalMs);
+  const vlmName = config.models.vlm.configured
+    ? config.models.vlm.name
+    : "not configured";
+  const llmName = config.models.llm.configured
+    ? config.models.llm.name
+    : "not configured";
   console.log(
-    `Asset processing worker started (model: ${config.modelConfigured ? "configured" : "not configured"}, protocol: ${config.MODEL_PROTOCOL}).`,
+    `Asset processing worker started (VLM: ${vlmName}, LLM: ${llmName}, VLM protocol: ${config.models.vlm.protocol}).`,
   );
   while (!stopping) {
     const job = claimNextJob();
