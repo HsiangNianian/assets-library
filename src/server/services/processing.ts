@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { loadConfig } from "@/server/config";
 import { db } from "@/server/db";
 import {
   analysisResults,
@@ -326,18 +325,17 @@ export async function processJob(
       completeJob(job);
       return;
     }
-    const result = await analyzer.analyze({
+    const outcome = await analyzer.analyze({
       assetId: asset.id,
       mediaType: asset.mediaType,
       mimeType: prepared.mimeType,
       relativePath: asset.originalPath,
     });
-    const config = loadConfig();
     persistAnalysis(
       job,
-      result,
-      config.MODEL_PROTOCOL,
-      config.MODEL_NAME ?? "unknown",
+      outcome.result,
+      outcome.model.protocol,
+      outcome.model.name,
     );
   } catch (error) {
     if (job.type === "embed") {

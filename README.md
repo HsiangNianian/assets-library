@@ -51,26 +51,60 @@ PORT=3100 npm run dev
 
 ## 模型配置
 
-设置 `MODEL_PROTOCOL` 为：
+当前图片和视频关键帧分析属于 VLM（视觉语言模型）任务。设置 `VLM_PROTOCOL` 为：
 
 - `openai_chat_completions`
 - `openai_responses`
 
-并配置 `MODEL_BASE_URL` 和 `MODEL_NAME`。兼容 NewAPI、百炼等第三方服务时使用其 OpenAI
-兼容 Base URL（通常以 `/v1` 结尾）。`MODEL_API_KEY` 是可选的：网关启用鉴权时填写
+并配置 `VLM_BASE_URL` 和 `VLM_NAME`。兼容 NewAPI、百炼等第三方服务时使用其 OpenAI
+兼容 Base URL（通常以 `/v1` 结尾）。`VLM_API_KEY` 是可选的：网关启用鉴权时填写
 NewAPI 令牌，网关关闭鉴权时可以留空；留空后请求不会发送 `Authorization` 请求头。
 
 `qwen3.7` 系列默认开启思考模式。素材结构化提取不需要长推理，建议关闭以降低等待时间：
 
 ```dotenv
-MODEL_ENABLE_THINKING=false
+VLM_NAME=qwen3.7-plus
+VLM_FALLBACK_NAMES=kimi-k2.5,Qwythos
+VLM_ENABLE_THINKING=false
 ```
+
+`VLM_FALLBACK_NAMES` 是按优先级排列的逗号分隔候选列表。主模型额度耗尽、模型不存在或
+明确不支持视觉输入时，worker 会依次切换候选；网络错误、超时、普通限流和 5xx 会先按
+`VLM_RETRY_COUNT` 重试当前模型，仍失败后再切换。401/403 鉴权失败及普通请求参数错误不会
+继续尝试共享同一端点和密钥的候选。结构化响应无效时，每个候选会获得一次纠正机会。
+
+同组候选共享 protocol、Base URL 和 API Key，模型名必须使用网关返回的精确 ID。主模型与
+fallback 合计最多 5 个，重复名称会在保留原顺序的前提下去除。显式设置的
+`VLM_ENABLE_THINKING` 会应用到整个候选链。失败候选会进入内存冷却，避免每个任务都重复
+请求已耗尽额度的模型：
+
+```dotenv
+VLM_FAILOVER_COOLDOWN_MS=1800000
+```
+
+配额和模型能力错误使用上述冷却时长；短暂故障与无效响应最多冷却 60 秒。worker 重启后
+冷却状态会清空；若所有候选都在冷却，则探测最早到期的候选。分析成功后，数据库保存实际
+完成任务的候选模型名和协议，而不是固定记录主模型。
+
+`LLM_PROTOCOL`、`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_NAME`、
+`LLM_FALLBACK_NAMES` 和 `LLM_ENABLE_THINKING` 构成独立的纯文本模型配置。`LLM_BASE_URL` 和 `LLM_API_KEY`
+留空时复用 VLM 的端点与密钥；当前业务尚未调用 LLM。每个模型组独立决定是否发送
+`enable_thinking`，不会把 VLM 的扩展参数透传给 LLM。
+
+```dotenv
+LLM_NAME=Qwythos
+LLM_FALLBACK_NAMES=kimi-k2.5
+LLM_ENABLE_THINKING=false
+```
+
+`LLM_FALLBACK_NAMES` 已按与 VLM 相同的规则完成配置解析，供后续纯文本任务直接复用；由于
+当前没有 LLM 业务调用，本次不会宣称 LLM 自动切换已经被执行。
 
 视频分析使用 Chat Completions 的多图片输入。worker 按视频时长在服务端提取 1–5 张 JPEG 关键帧，并将关键帧及其时间点交给模型；原始 MP4 只用于存储和预览。配置：
 
 ```dotenv
-MODEL_VIDEO_MODE=frames
-MODEL_VIDEO_TIMEOUT_MS=300000
+VLM_VIDEO_MODE=frames
+VLM_VIDEO_TIMEOUT_MS=300000
 ```
 
 不超过 5 秒的视频每秒取一帧（向上取整，至少一帧），超过 5 秒的视频固定取五帧；时间点均为各等分区间的中点，因此长视频取 10%、30%、50%、70%、90% 位置。FFmpeg 以 JPEG 保存关键帧。视频大小不再影响模型传递策略，也不需要公网 URL。
@@ -88,8 +122,9 @@ Responses 协议或禁用视频能力时，视频任务会明确失败为 `model
 `/embeddings` 接口，并把向量持久化到本地 Chroma 的 `asset_analysis` collection。搜索关键词会用
 同一模型生成向量，语义命中与标签模糊匹配合并排序；Chroma 暂不可用时仍保留标签搜索。
 
-`docker compose up -d` 会启动持久化的 Chroma 服务。填写以下配置即可启用（`EMBEDDING_BASE_URL`
-留空时复用 `MODEL_BASE_URL`；embedding 模型必须与查询阶段相同）：
+`docker compose up -d` 会启动持久化的 Chroma 服务。填写以下配置即可启用。`EMBEDDING_BASE_URL`
+和 `EMBEDDING_API_KEY` 留空时优先复用已配置的 VLM 端点和密钥；若 VLM 未配置，则复用
+LLM。embedding 模型必须与查询阶段相同：
 
 ```dotenv
 CHROMA_URL=http://127.0.0.1:8100
@@ -123,7 +158,7 @@ npm run start:worker
   cp .env.example .env
   ```
 
-  至少确认 `.env` 中的 `MODEL_PROTOCOL`、`MODEL_BASE_URL`、`MODEL_API_KEY`（如需要）和 `MODEL_NAME` 适用于你的模型服务。不要将 `.env` 提交到 Git 或打包进镜像。
+  至少确认 `.env` 中的 `VLM_PROTOCOL`、`VLM_BASE_URL`、`VLM_API_KEY`（如需要）和 `VLM_NAME` 适用于你的模型服务。不要将 `.env` 提交到 Git 或打包进镜像。
 
 ### 构建镜像
 

@@ -3,8 +3,9 @@
 ## 准备
 
 1. 安装 Node.js 22+ 和 pnpm。
-2. 执行 `cp .env.example .env` 并配置模型地址、密钥和模型名。
-3. 使用 Qwen3.7 时设置 `MODEL_ENABLE_THINKING=false`；Chat Completions 视频分析设置 `MODEL_VIDEO_MODE=frames` 和 `MODEL_VIDEO_TIMEOUT_MS=300000`。
+2. 执行 `cp .env.example .env` 并配置模型地址、密钥、主模型名以及按优先级排列的 `VLM_FALLBACK_NAMES`；候选名必须是网关的精确模型 ID。
+3. 使用 Qwen3.7 VLM 时设置 `VLM_ENABLE_THINKING=false`；该值应用到全部 VLM 候选。Chat Completions 视频分析设置 `VLM_VIDEO_MODE=frames` 和 `VLM_VIDEO_TIMEOUT_MS=300000`。
+4. 如需预配置纯文本模型链，设置 `LLM_NAME`、`LLM_FALLBACK_NAMES` 和 `LLM_ENABLE_THINKING=false`；当前业务尚不调用 LLM。
 
 ## 启动
 
@@ -28,6 +29,7 @@ pnpm dev
 8. 重试失败素材时确认复用已有帧；删除后确认概览、详情、媒体 URL 和素材目录均不可访问。
 9. 分析期间终止并重启 worker，确认失联任务在心跳过期后重新排队并最终完成。
 10. 打开素材详情，点击删除按钮旁的“下载素材”，确认响应使用原始上传文件名且文件内容可读取。
+11. 将主 VLM 模拟为配额耗尽或不可用，确认 worker 按 `VLM_FALLBACK_NAMES` 的顺序切换，并在分析结果中保存实际成功的模型名。
 
 ## 质量命令
 

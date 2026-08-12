@@ -1,5 +1,11 @@
 import fs from "node:fs/promises";
-import { loadConfig, type AppConfig } from "@/server/config";
+import {
+  loadConfig,
+  type AppConfig,
+  type ConfiguredModelTarget,
+  type ModelProtocol,
+  type ModelTarget,
+} from "@/server/config";
 import { AppError } from "@/server/errors";
 import {
   readVideoFrames,
@@ -10,6 +16,11 @@ import {
   type AnalysisResult,
   type MediaType,
 } from "@/shared/contracts";
+import {
+  ModelCandidateCooldowns,
+  ModelRequestError,
+  modelRequestErrorFromResponse,
+} from "./failover";
 
 export interface AnalyzeInput {
   assetId: string;
@@ -19,7 +30,20 @@ export interface AnalyzeInput {
 }
 
 export interface MultimodalAnalyzer {
-  analyze(input: AnalyzeInput): Promise<AnalysisResult>;
+  analyze(input: AnalyzeInput): Promise<AnalysisOutcome>;
+}
+
+export interface AnalysisOutcome {
+  result: AnalysisResult;
+  model: {
+    protocol: ModelProtocol;
+    name: string;
+  };
+}
+
+interface AnalyzerRuntime {
+  now?: () => number;
+  sleep?: (milliseconds: number) => Promise<void>;
 }
 
 const imageShape = `{
@@ -105,7 +129,11 @@ function extractResponsesText(payload: unknown) {
   throw new AppError("model_response_invalid");
 }
 
-async function mediaContent(input: AnalyzeInput, config: AppConfig) {
+async function mediaContent(
+  input: AnalyzeInput,
+  config: AppConfig,
+  model: ModelTarget,
+) {
   if (input.mediaType === "image") {
     const bytes = await fs.readFile(
       resolveMediaPath(input.relativePath, config.mediaRoot),
@@ -128,8 +156,8 @@ async function mediaContent(input: AnalyzeInput, config: AppConfig) {
     };
   }
   if (
-    config.MODEL_PROTOCOL !== "openai_chat_completions" ||
-    config.MODEL_VIDEO_MODE !== "frames"
+    model.protocol !== "openai_chat_completions" ||
+    config.VLM_VIDEO_MODE !== "frames"
   ) {
     throw new AppError("model_video_unsupported");
   }
@@ -157,106 +185,225 @@ async function mediaContent(input: AnalyzeInput, config: AppConfig) {
 }
 
 export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
-  constructor(private readonly config = loadConfig()) {}
+  private readonly now: () => number;
+  private readonly sleep: (milliseconds: number) => Promise<void>;
+  private readonly cooldowns: ModelCandidateCooldowns;
 
-  async analyze(input: AnalyzeInput): Promise<AnalysisResult> {
-    if (!this.config.modelConfigured) throw new AppError("model_not_configured");
-    const media = await mediaContent(input, this.config);
-    let correction: string | undefined;
-    const attempts = Math.max(2, this.config.MODEL_RETRY_COUNT + 1);
+  constructor(
+    private readonly config = loadConfig(),
+    runtime: AnalyzerRuntime = {},
+  ) {
+    this.now = runtime.now ?? Date.now;
+    this.sleep =
+      runtime.sleep ??
+      ((milliseconds) =>
+        new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    this.cooldowns = new ModelCandidateCooldowns(this.now);
+  }
 
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const prompt = promptFor(input.mediaType, correction);
-      const controller = new AbortController();
-      const timer = setTimeout(
-        () => controller.abort(),
-        input.mediaType === "video"
-          ? this.config.MODEL_VIDEO_TIMEOUT_MS
-          : this.config.MODEL_TIMEOUT_MS,
-      );
+  async analyze(input: AnalyzeInput): Promise<AnalysisOutcome> {
+    const configuredCandidates = this.config.models.vlmCandidates;
+    if (configuredCandidates.length === 0) {
+      throw new AppError("model_not_configured");
+    }
+    const media = await mediaContent(
+      input,
+      this.config,
+      configuredCandidates[0],
+    );
+    const candidates = this.cooldowns.candidatesForAttempt(configuredCandidates);
+    let lastFailure: "request" | "response" = "request";
+
+    for (const candidate of candidates) {
       try {
-        const isChat = this.config.MODEL_PROTOCOL === "openai_chat_completions";
-        const endpoint = isChat ? "chat/completions" : "responses";
-        const thinking =
-          this.config.modelEnableThinking === null
-            ? {}
-            : { enable_thinking: this.config.modelEnableThinking };
-        const body = isChat
-          ? {
-              model: this.config.MODEL_NAME,
-              temperature: 0,
-              ...thinking,
-              messages: [
-                {
-                  role: "user",
-                  content: [{ type: "text", text: prompt }, ...media.chat],
-                },
-              ],
-            }
-          : {
-              model: this.config.MODEL_NAME,
-              ...thinking,
-              input: [
-                {
-                  role: "user",
-                  content: [
-                    { type: "input_text", text: prompt },
-                    ...(media.responses ?? []),
-                  ],
-                },
-              ],
-            };
-        const response = await fetch(
-          `${this.config.MODEL_BASE_URL!.replace(/\/$/, "")}/${endpoint}`,
-          {
-            method: "POST",
-            headers: {
-              authorization: `Bearer ${this.config.MODEL_API_KEY}`,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify(body),
-            signal: controller.signal,
-          },
-        );
-        if (!response.ok) {
-          throw new AppError(
-            "model_request_failed",
-            `模型服务返回 HTTP ${response.status}。`,
+        const result = await this.analyzeWithModel(candidate, input, media);
+        this.cooldowns.clear(candidate);
+        return {
+          result,
+          model: { protocol: candidate.protocol, name: candidate.name },
+        };
+      } catch (error) {
+        if (error instanceof ModelRequestError) {
+          if (error.kind === "fatal") {
+            throw new AppError("model_request_failed");
+          }
+          lastFailure = "request";
+          this.cooldowns.mark(
+            candidate,
+            this.cooldownDuration(error.kind),
+            error.kind,
           );
+          continue;
         }
-        const payload: unknown = await response.json();
-        const text = isChat ? extractChatText(payload) : extractResponsesText(payload);
+        if (error instanceof AppError && error.code === "model_response_invalid") {
+          lastFailure = "response";
+          this.cooldowns.mark(
+            candidate,
+            this.transientCooldownDuration(),
+            "response_invalid",
+          );
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    throw new AppError(
+      lastFailure === "response"
+        ? "model_response_invalid"
+        : "model_request_failed",
+    );
+  }
+
+  private async analyzeWithModel(
+    model: ConfiguredModelTarget,
+    input: AnalyzeInput,
+    media: Awaited<ReturnType<typeof mediaContent>>,
+  ) {
+    let correction: string | undefined;
+    let correctionUsed = false;
+    let retriesRemaining = this.config.VLM_RETRY_COUNT;
+
+    while (true) {
+      try {
+        const text = await this.requestModel(model, input, media, correction);
         try {
           return requireChineseLabels(
             analysisResultSchema.parse(JSON.parse(stripCodeFence(text))),
           );
         } catch (error) {
+          if (correctionUsed) throw new AppError("model_response_invalid");
+          correctionUsed = true;
           correction =
-            error instanceof Error ? error.message.slice(0, 500) : "JSON 格式错误";
+            error instanceof Error
+              ? error.message.slice(0, 500)
+              : "JSON 格式错误";
         }
       } catch (error) {
-        if (error instanceof AppError && error.code === "model_response_invalid") {
-          correction = error.message;
-        } else if (
+        if (
           error instanceof AppError &&
-          error.code === "model_request_failed"
+          error.code === "model_response_invalid"
         ) {
-          if (attempt === attempts - 1) throw error;
-        } else if (error instanceof Error && error.name === "AbortError") {
-          if (attempt === attempts - 1) {
-            throw new AppError("model_request_failed", "模型请求超时。");
-          }
-        } else {
-          if (attempt === attempts - 1) {
-            throw error instanceof AppError
-              ? error
-              : new AppError("model_request_failed");
-          }
+          if (correctionUsed) throw error;
+          correctionUsed = true;
+          correction = error.message.slice(0, 500);
+          continue;
         }
-      } finally {
-        clearTimeout(timer);
+        const requestError = this.normalizeRequestError(error);
+        if (!requestError) throw error;
+        if (requestError.kind !== "transient" || retriesRemaining === 0) {
+          throw requestError;
+        }
+        retriesRemaining -= 1;
+        const retryDelay = Math.min(requestError.retryAfterMs ?? 0, 5_000);
+        if (retryDelay > 0) await this.sleep(retryDelay);
       }
     }
-    throw new AppError("model_response_invalid");
+  }
+
+  private async requestModel(
+    model: ConfiguredModelTarget,
+    input: AnalyzeInput,
+    media: Awaited<ReturnType<typeof mediaContent>>,
+    correction: string | undefined,
+  ) {
+    const prompt = promptFor(input.mediaType, correction);
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(),
+      input.mediaType === "video"
+        ? this.config.VLM_VIDEO_TIMEOUT_MS
+        : this.config.VLM_TIMEOUT_MS,
+    );
+    const isChat = model.protocol === "openai_chat_completions";
+    const endpoint = isChat ? "chat/completions" : "responses";
+    const thinking =
+      model.requestOptions.enableThinking === null
+        ? {}
+        : { enable_thinking: model.requestOptions.enableThinking };
+    const body = isChat
+      ? {
+          model: model.name,
+          temperature: 0,
+          ...thinking,
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: prompt }, ...media.chat],
+            },
+          ],
+        }
+      : {
+          model: model.name,
+          ...thinking,
+          input: [
+            {
+              role: "user",
+              content: [
+                { type: "input_text", text: prompt },
+                ...(media.responses ?? []),
+              ],
+            },
+          ],
+        };
+
+    try {
+      const response = await fetch(`${model.baseUrl}/${endpoint}`, {
+        method: "POST",
+        headers: {
+          ...(model.apiKey
+            ? { authorization: `Bearer ${model.apiKey}` }
+            : {}),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw await modelRequestErrorFromResponse(response, this.now());
+      }
+      let payload: unknown;
+      try {
+        payload = await response.json();
+      } catch (error) {
+        if (
+          error instanceof TypeError ||
+          (error instanceof Error && error.name === "AbortError")
+        ) {
+          throw error;
+        }
+        throw new AppError("model_response_invalid");
+      }
+      return isChat ? extractChatText(payload) : extractResponsesText(payload);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private normalizeRequestError(error: unknown) {
+    if (error instanceof ModelRequestError) return error;
+    if (error instanceof Error && error.name === "AbortError") {
+      return new ModelRequestError({
+        kind: "transient",
+        message: "Model request timed out.",
+      });
+    }
+    if (error instanceof TypeError) {
+      return new ModelRequestError({
+        kind: "transient",
+        message: "Model network request failed.",
+      });
+    }
+    return undefined;
+  }
+
+  private cooldownDuration(kind: ModelRequestError["kind"]) {
+    return kind === "quota" || kind === "candidate"
+      ? this.config.VLM_FAILOVER_COOLDOWN_MS
+      : this.transientCooldownDuration();
+  }
+
+  private transientCooldownDuration() {
+    return Math.min(this.config.VLM_FAILOVER_COOLDOWN_MS, 60_000);
   }
 }
