@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { loadConfig, type AppConfig } from "@/server/config";
+import { loadConfig, type AppConfig, type ModelTarget } from "@/server/config";
 import { AppError } from "@/server/errors";
 import {
   readVideoFrames,
@@ -105,7 +105,11 @@ function extractResponsesText(payload: unknown) {
   throw new AppError("model_response_invalid");
 }
 
-async function mediaContent(input: AnalyzeInput, config: AppConfig) {
+async function mediaContent(
+  input: AnalyzeInput,
+  config: AppConfig,
+  model: ModelTarget,
+) {
   if (input.mediaType === "image") {
     const bytes = await fs.readFile(
       resolveMediaPath(input.relativePath, config.mediaRoot),
@@ -128,8 +132,8 @@ async function mediaContent(input: AnalyzeInput, config: AppConfig) {
     };
   }
   if (
-    config.MODEL_PROTOCOL !== "openai_chat_completions" ||
-    config.MODEL_VIDEO_MODE !== "frames"
+    model.protocol !== "openai_chat_completions" ||
+    config.VLM_VIDEO_MODE !== "frames"
   ) {
     throw new AppError("model_video_unsupported");
   }
@@ -160,10 +164,11 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
   constructor(private readonly config = loadConfig()) {}
 
   async analyze(input: AnalyzeInput): Promise<AnalysisResult> {
-    if (!this.config.modelConfigured) throw new AppError("model_not_configured");
-    const media = await mediaContent(input, this.config);
+    const model = this.config.models.vlm;
+    if (!model.configured) throw new AppError("model_not_configured");
+    const media = await mediaContent(input, this.config, model);
     let correction: string | undefined;
-    const attempts = Math.max(2, this.config.MODEL_RETRY_COUNT + 1);
+    const attempts = Math.max(2, this.config.VLM_RETRY_COUNT + 1);
 
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const prompt = promptFor(input.mediaType, correction);
@@ -171,19 +176,19 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
       const timer = setTimeout(
         () => controller.abort(),
         input.mediaType === "video"
-          ? this.config.MODEL_VIDEO_TIMEOUT_MS
-          : this.config.MODEL_TIMEOUT_MS,
+          ? this.config.VLM_VIDEO_TIMEOUT_MS
+          : this.config.VLM_TIMEOUT_MS,
       );
       try {
-        const isChat = this.config.MODEL_PROTOCOL === "openai_chat_completions";
+        const isChat = model.protocol === "openai_chat_completions";
         const endpoint = isChat ? "chat/completions" : "responses";
         const thinking =
-          this.config.modelEnableThinking === null
+          model.requestOptions.enableThinking === null
             ? {}
-            : { enable_thinking: this.config.modelEnableThinking };
+            : { enable_thinking: model.requestOptions.enableThinking };
         const body = isChat
           ? {
-              model: this.config.MODEL_NAME,
+              model: model.name,
               temperature: 0,
               ...thinking,
               messages: [
@@ -194,7 +199,7 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
               ],
             }
           : {
-              model: this.config.MODEL_NAME,
+              model: model.name,
               ...thinking,
               input: [
                 {
@@ -207,11 +212,13 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
               ],
             };
         const response = await fetch(
-          `${this.config.MODEL_BASE_URL!.replace(/\/$/, "")}/${endpoint}`,
+          `${model.baseUrl}/${endpoint}`,
           {
             method: "POST",
             headers: {
-              authorization: `Bearer ${this.config.MODEL_API_KEY}`,
+              ...(model.apiKey
+                ? { authorization: `Bearer ${model.apiKey}` }
+                : {}),
               "content-type": "application/json",
             },
             body: JSON.stringify(body),
