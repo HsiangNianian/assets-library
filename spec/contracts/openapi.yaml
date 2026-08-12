@@ -123,6 +123,7 @@ paths:
       responses:
         "200": { description: 完整媒体内容 }
         "206": { description: Range 请求的部分媒体内容 }
+        "409": { $ref: "#/components/responses/Error" }
 components:
   responses:
     Error:

@@ -153,7 +153,7 @@ function summaryFromRow(
     processingStatus: row.processingStatus,
     reviewStatus: row.reviewStatus,
     tags: tagList,
-    mediaUrl: `/api/media/${row.id}`,
+    mediaUrl: `/api/media/${row.id}?v=${row.updatedAt.getTime()}`,
     createdAt: row.createdAt.toISOString(),
   };
 }

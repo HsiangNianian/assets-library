@@ -70,6 +70,8 @@ curl -X POST http://localhost:3000/api/uploads/videos \
 
 `processingStatus` 可能为：`queued`、`validating`、`analyzing`、`completed`、`failed`。`validating` 阶段执行图片签名/解码和目标格式转换，或执行视频探测、完整解码、H.264 MP4 归一化及关键帧提取。失败响应会携带稳定错误码和可操作说明。
 
+媒体接口仅在媒体校验和必要转换完成后提供内容；排队或正在校验时返回 `409`，避免以目标 MIME 返回尚未正规化的原始字节。概览和详情使用带版本参数的媒体 URL，在状态变化后重新加载正规化后的内容。
+
 ## 素材查询
 
 ### `GET /api/assets`
