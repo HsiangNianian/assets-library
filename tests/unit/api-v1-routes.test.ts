@@ -46,9 +46,11 @@ const asset: ApiV1AssetDetail = {
   media_url: `/api/v1/media/${assetId}`,
   original_filename: "demo.png",
   mime_type: "image/png",
-  size_bytes: 3,
-  auto_publish: false,
-  failure: null,
+    size_bytes: 3,
+    auto_publish: false,
+    segment_start_seconds: null,
+    segment_end_seconds: null,
+    failure: null,
   analysis: null,
   created_at: now,
   updated_at: now,
@@ -142,6 +144,26 @@ function fakeService() {
       has_more: false,
     })),
     getAsset: vi.fn(async () => asset),
+    listUsers: vi.fn(async () => [
+      {
+        user_id: "user-7",
+        display_name: null,
+        email: null,
+        department: null,
+        first_seen_at: now,
+        last_seen_at: now,
+        asset_count: 1,
+      },
+      {
+        user_id: "user-8",
+        display_name: "用户 8",
+        email: "user-8@example.com",
+        department: "剪辑",
+        first_seen_at: now,
+        last_seen_at: now,
+        asset_count: 3,
+      },
+    ]),
     updateAsset: vi.fn(async () =>
       task({ task_type: "update", phase: "updating" }),
     ),
@@ -154,6 +176,11 @@ function fakeService() {
     deleteAsset: vi.fn(async () =>
       task({ task_type: "delete", phase: "deleting" }),
     ),
+    listTasks: vi.fn(async () => ({
+      items: [],
+      next_cursor: null,
+      has_more: false,
+    })),
     getMedia: vi.fn(async () =>
       new Response(new Uint8Array([2, 3, 4]), {
         status: 206,
@@ -646,13 +673,36 @@ describe("API v1 contracts and routes", () => {
     });
   });
 
-  it("keeps the OpenAPI specification public without authentication", async () => {
-    const response = await getOpenApi();
+  it("keeps OpenAPI public when the dev WebUI lock is disabled", async () => {
+    vi.stubEnv("APP_MODE", "dev");
+    vi.stubEnv("WEBUI_LOCK_KEY", "");
+    const response = await getOpenApi(
+      new Request("http://localhost/api/v1/openapi"),
+    );
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe(
       "application/yaml; charset=utf-8",
     );
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(await response.text()).toContain("openapi: 3.1.0");
+    const specification = await response.text();
+    expect(specification).toContain("openapi: 3.1.0");
+    for (const path of [
+      "/api/v1/uploads:",
+      "/api/v1/uploads/{task_id}/items/{item_id}:",
+      "/api/v1/uploads/{task_id}:",
+      "/api/v1/tasks/{task_id}:",
+      "/api/v1/assets/query:",
+      "/api/v1/assets/{asset_id}:",
+      "/api/v1/assets/{asset_id}/publish:",
+      "/api/v1/assets/{asset_id}/retry:",
+      "/api/v1/media/{asset_id}:",
+      "/api/v1/media/{asset_id}/thumbnail:",
+      "/api/v1/users/{user_id}/media:",
+      "/api/v1/users/{user_id}/storage-usage:",
+      "/api/v1/openapi:",
+    ]) {
+      expect(specification).toContain(path);
+    }
+    expect(specification).not.toContain("/api/ui/v1/");
   });
 });
