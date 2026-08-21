@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Pool, RowDataPacket } from "mysql2/promise";
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import {
@@ -17,6 +17,7 @@ import {
   mediaObjects,
   taskItems,
   tasks,
+  users,
   videoSources,
 } from "@/server/db/schema";
 import type { ObjectStorage } from "@/server/storage/object-storage";
@@ -53,6 +54,7 @@ const applicationTables = [
   "task_item_segments",
   "task_items",
   "tasks",
+  "users",
   "video_sources",
 ] as const;
 
@@ -106,6 +108,286 @@ mysqlTest("MySQL 数据层", () => {
     if (migrationConnection) await closeDatabase(migrationConnection);
   });
 
+  async function insertSchedulingTask(id: string, createdAt: Date) {
+    await migrationConnection.db.insert(tasks).values({
+      id,
+      type: "upload",
+      status: "running",
+      phase: "analyzing",
+      createdAt,
+      updatedAt: createdAt,
+    });
+  }
+
+  async function insertSchedulingJob(input: {
+    taskId: string;
+    type: "validate" | "analyze";
+    createdAt: Date;
+  }) {
+    const id = crypto.randomUUID();
+    await migrationConnection.db.insert(jobs).values({
+      id,
+      taskId: input.taskId,
+      type: input.type,
+      availableAt: input.createdAt,
+      createdAt: input.createdAt,
+      updatedAt: input.createdAt,
+    });
+    return id;
+  }
+
+  test("validate 作业优先于更早入队的 analyze 作业", async () => {
+    const now = new Date();
+    const analysisTaskId = crypto.randomUUID();
+    const validationTaskId = crypto.randomUUID();
+    await insertSchedulingTask(analysisTaskId, new Date(now.getTime() - 2_000));
+    await insertSchedulingTask(validationTaskId, new Date(now.getTime() - 1_000));
+    await insertSchedulingJob({
+      taskId: analysisTaskId,
+      type: "analyze",
+      createdAt: new Date(now.getTime() - 2_000),
+    });
+    const validationJobId = await insertSchedulingJob({
+      taskId: validationTaskId,
+      type: "validate",
+      createdAt: new Date(now.getTime() - 1_000),
+    });
+
+    await expect(repository.claimNextJob("priority-test")).resolves.toMatchObject({
+      id: validationJobId,
+      taskId: validationTaskId,
+      type: "validate",
+    });
+  });
+
+  test("并发领取时每个竞争任务最多占用两个分析 worker，独占队列后可突发", async () => {
+    const now = new Date();
+    const firstTaskId = crypto.randomUUID();
+    const secondTaskId = crypto.randomUUID();
+    await insertSchedulingTask(firstTaskId, new Date(now.getTime() - 2_000));
+    await insertSchedulingTask(secondTaskId, new Date(now.getTime() - 1_000));
+    for (let index = 0; index < 3; index += 1) {
+      await insertSchedulingJob({
+        taskId: firstTaskId,
+        type: "analyze",
+        createdAt: new Date(now.getTime() - 2_000 + index),
+      });
+      await insertSchedulingJob({
+        taskId: secondTaskId,
+        type: "analyze",
+        createdAt: new Date(now.getTime() - 1_000 + index),
+      });
+    }
+
+    const claimed = await Promise.all(
+      Array.from({ length: 4 }, (_, index) =>
+        repository.claimNextJob(`fairness-test:${index}`, {
+          analyzeTaskSoftLimit: 2,
+        }),
+      ),
+    );
+    const counts = new Map<string, number>();
+    for (const job of claimed) {
+      expect(job?.type).toBe("analyze");
+      if (job?.taskId) counts.set(job.taskId, (counts.get(job.taskId) ?? 0) + 1);
+    }
+    expect(counts.get(firstTaskId)).toBe(2);
+    expect(counts.get(secondTaskId)).toBe(2);
+    await expect(
+      repository.claimNextJob("fairness-test:blocked", {
+        analyzeTaskSoftLimit: 2,
+      }),
+    ).resolves.toBeNull();
+
+    await migrationConnection.db
+      .update(jobs)
+      .set({ status: "done", updatedAt: new Date() })
+      .where(and(eq(jobs.taskId, secondTaskId), eq(jobs.status, "queued")));
+    await expect(
+      repository.claimNextJob("fairness-test:burst", {
+        analyzeTaskSoftLimit: 2,
+      }),
+    ).resolves.toMatchObject({ taskId: firstTaskId, type: "analyze" });
+  });
+
+  test("不可分析的 retry 素材会终止任务而不是永久停留在 running", async () => {
+    const assetId = crypto.randomUUID();
+    await repository.createAsset({
+      assetId,
+      name: "unavailable retry target",
+      originalFilename: "retry.jpg",
+      originalPath: "/tmp/retry.jpg",
+      mimeType: "image/jpeg",
+      mediaType: "image",
+      sizeBytes: 10,
+      directPublish: false,
+      enqueueAnalysis: false,
+    });
+    await migrationConnection.db
+      .update(assets)
+      .set({ processingStatus: "failed", reviewStatus: "published" })
+      .where(eq(assets.id, assetId));
+    const created = await repository.createMutationTask({
+      type: "retry",
+      assetId,
+      payload: { userId: null },
+    });
+    const retryJob = await repository.claimNextJob("retry-unavailable");
+    if (!retryJob) throw new Error("retry 作业未被领取。");
+    const { processMutationJob } = await import(
+      "@/server/services/mutation-pipeline"
+    );
+    await processMutationJob(retryJob, {} as ObjectStorage);
+
+    const analysisJob = await repository.claimNextJob("retry-analysis");
+    if (!analysisJob) throw new Error("analysis 作业未被领取。");
+    const analyze = vi.fn();
+    const { processJob } = await import("@/server/services/processing");
+    await processJob(
+      analysisJob,
+      { analyze },
+      async () => {
+        throw new Error("不可分析的素材不应进入媒体准备。");
+      },
+    );
+
+    expect(analyze).not.toHaveBeenCalled();
+    const [storedJob] = await migrationConnection.db
+      .select({ status: jobs.status })
+      .from(jobs)
+      .where(eq(jobs.id, analysisJob.id));
+    const [storedTask] = await migrationConnection.db
+      .select({ status: tasks.status, phase: tasks.phase })
+      .from(tasks)
+      .where(eq(tasks.id, created.task.id));
+    expect(storedJob?.status).toBe("failed");
+    expect(storedTask).toEqual({ status: "failed", phase: "finished" });
+  });
+
+  test("丢失租约的旧 analysis worker 不会覆盖新 attempt 的任务状态", async () => {
+    const taskId = crypto.randomUUID();
+    const assetId = crypto.randomUUID();
+    await insertSchedulingTask(taskId, new Date());
+    await repository.createAsset({
+      assetId,
+      taskId,
+      name: "lease handoff target",
+      originalFilename: "handoff.jpg",
+      originalPath: "/tmp/handoff.jpg",
+      mimeType: "image/jpeg",
+      mediaType: "image",
+      sizeBytes: 10,
+      directPublish: false,
+      enqueueAnalysis: false,
+    });
+    const jobId = await insertSchedulingJob({
+      taskId,
+      type: "analyze",
+      createdAt: new Date(),
+    });
+    await migrationConnection.db
+      .update(jobs)
+      .set({ assetId })
+      .where(eq(jobs.id, jobId));
+    const staleJob = await repository.claimNextJob("old-worker");
+    if (!staleJob) throw new Error("旧 worker 未领取作业。");
+    await migrationConnection.db
+      .update(jobs)
+      .set({ status: "queued", claimedAt: null, leaseOwner: null })
+      .where(eq(jobs.id, jobId));
+    const currentJob = await repository.claimNextJob("new-worker");
+    expect(currentJob).toMatchObject({ id: jobId, attempt: 2 });
+
+    const analyze = vi.fn();
+    const { processJob } = await import("@/server/services/processing");
+    await processJob(
+      staleJob,
+      { analyze },
+      async () => {
+        throw new Error("丢失租约后不应继续处理媒体。");
+      },
+    );
+
+    expect(analyze).not.toHaveBeenCalled();
+    const [storedJob] = await migrationConnection.db
+      .select({ status: jobs.status, attempt: jobs.attempt })
+      .from(jobs)
+      .where(eq(jobs.id, jobId));
+    const [storedTask] = await migrationConnection.db
+      .select({ status: tasks.status })
+      .from(tasks)
+      .where(eq(tasks.id, taskId));
+    expect(storedJob).toEqual({ status: "running", attempt: 2 });
+    expect(storedTask?.status).toBe("running");
+  });
+
+  test("分析调度与 mutation worker 并发时不会因 task 索引锁顺序死锁", async () => {
+    const now = new Date();
+    for (let taskIndex = 0; taskIndex < 4; taskIndex += 1) {
+      const taskId = crypto.randomUUID();
+      await insertSchedulingTask(taskId, new Date(now.getTime() + taskIndex));
+      for (let jobIndex = 0; jobIndex < 3; jobIndex += 1) {
+        await insertSchedulingJob({
+          taskId,
+          type: "analyze",
+          createdAt: new Date(now.getTime() + taskIndex * 10 + jobIndex),
+        });
+      }
+    }
+
+    const assetId = crypto.randomUUID();
+    await repository.createAsset({
+      assetId,
+      name: "concurrent mutation target",
+      originalFilename: "target.jpg",
+      originalPath: "/tmp/target.jpg",
+      mimeType: "image/jpeg",
+      mediaType: "image",
+      sizeBytes: 10,
+      directPublish: false,
+      enqueueAnalysis: false,
+    });
+    const mutationTaskIds: string[] = [];
+    for (let index = 0; index < 12; index += 1) {
+      const created = await repository.createMutationTask({
+        type: "update",
+        assetId,
+        payload: {
+          name: `updated-${index}`,
+          description: "concurrency regression",
+          tags: [],
+          userId: null,
+        },
+      });
+      mutationTaskIds.push(created.task.id);
+    }
+
+    const { processMutationJob } = await import(
+      "@/server/services/mutation-pipeline"
+    );
+    const storage = {} as ObjectStorage;
+    await Promise.all(
+      Array.from({ length: 4 }, async (_, index) => {
+        const leaseOwner = `mutation-deadlock:${index}`;
+        for (;;) {
+          const job = await repository.claimNextJob(leaseOwner, {
+            analyzeTaskSoftLimit: 2,
+          });
+          if (!job) return;
+          if (job.type === "update") await processMutationJob(job, storage);
+          else await repository.completeJob(job);
+        }
+      }),
+    );
+
+    const mutationTasks = await migrationConnection.db
+      .select({ status: tasks.status })
+      .from(tasks)
+      .where(inArray(tasks.id, mutationTaskIds));
+    expect(mutationTasks).toHaveLength(mutationTaskIds.length);
+    expect(mutationTasks.every((task) => task.status === "done")).toBe(true);
+  }, 30_000);
+
   test("迁移生成完整的 MySQL 8 schema，并以 UTC/TLS 建立连接", async () => {
     const [tableRows] = await migrationConnection.pool.query<
       Array<RowDataPacket & { tableName: string }>
@@ -113,10 +395,25 @@ mysqlTest("MySQL 数据层", () => {
       `SELECT table_name AS tableName
          FROM information_schema.tables
         WHERE table_schema = DATABASE()
+          AND table_type = 'BASE TABLE'
           AND table_name <> '__drizzle_migrations'
         ORDER BY table_name`,
     );
     expect(tableRows.map((row) => row.tableName)).toEqual(applicationTables);
+
+    const [viewRows] = await migrationConnection.pool.query<
+      Array<RowDataPacket & { tableName: string }>
+    >(
+      `SELECT table_name AS tableName
+         FROM information_schema.views
+        WHERE table_schema = DATABASE()
+          AND table_name IN ('reporting_database_tables', 'reporting_user_assets')
+        ORDER BY table_name`,
+    );
+    expect(viewRows.map((row) => row.tableName)).toEqual([
+      "reporting_database_tables",
+      "reporting_user_assets",
+    ]);
 
     const inspection = await inspectDatabaseConnection(migrationConnection.pool);
     const [clockRows] = await migrationConnection.pool.query<
@@ -126,6 +423,85 @@ mysqlTest("MySQL 数据层", () => {
     );
     expect(Math.abs(Number(clockRows[0]?.utcDeltaSeconds ?? 60))).toBeLessThanOrEqual(1);
     expect(inspection.sslCipher).toBeTruthy();
+  });
+
+  test("注册用户列表保留零素材用户并忽略已删除素材", async () => {
+    const now = new Date("2026-08-20T01:02:03.000Z");
+    await migrationConnection.db.insert(users).values([
+      {
+        userId: "user-a",
+        displayName: "用户 A",
+        email: "user-a@example.com",
+        department: "剪辑",
+        firstSeenAt: now,
+        lastSeenAt: now,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        userId: "user-empty",
+        firstSeenAt: now,
+        lastSeenAt: now,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+    await migrationConnection.db.insert(assets).values([
+      {
+        id: crypto.randomUUID(),
+        userId: "user-a",
+        name: "active",
+        description: "",
+        mediaType: "image",
+        originalFilename: "active.jpg",
+        originalPath: "/tmp/active.jpg",
+        mimeType: "image/jpeg",
+        sizeBytes: 1,
+        reviewStatus: "published",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: crypto.randomUUID(),
+        userId: "user-a",
+        name: "deleted",
+        description: "",
+        mediaType: "image",
+        originalFilename: "deleted.jpg",
+        originalPath: "/tmp/deleted.jpg",
+        mimeType: "image/jpeg",
+        sizeBytes: 1,
+        reviewStatus: "deleted",
+        deletedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+
+    const registered = await repository.listRegisteredUsers();
+    expect(registered).toEqual([
+      expect.objectContaining({
+        userId: "user-a",
+        displayName: "用户 A",
+        email: "user-a@example.com",
+        department: "剪辑",
+        assetCount: 1,
+      }),
+      expect.objectContaining({ userId: "user-empty", assetCount: 0 }),
+    ]);
+
+    const { DefaultApiV1Service } = await import(
+      "@/server/api/v1/default-service"
+    );
+    await expect(new DefaultApiV1Service().listUsers()).resolves.toEqual([
+      expect.objectContaining({
+        user_id: "user-a",
+        display_name: "用户 A",
+        first_seen_at: "2026-08-20T09:02:03.000+08:00",
+        asset_count: 1,
+      }),
+      expect.objectContaining({ user_id: "user-empty", asset_count: 0 }),
+    ]);
   });
 
   test("流式上传进度在封存前不会误报完成，封存后创建校验作业", async () => {
@@ -153,6 +529,28 @@ mysqlTest("MySQL 数据层", () => {
           stagingPath: "/tmp/second.mp4",
         },
       ],
+    });
+
+    const [registeredUser] = await migrationConnection.db
+      .select()
+      .from(users)
+      .where(eq(users.userId, "user-a"));
+    expect(registeredUser).toMatchObject({
+      userId: "user-a",
+      displayName: null,
+      email: null,
+      department: null,
+    });
+    const { DefaultApiV1Service } = await import(
+      "@/server/api/v1/default-service"
+    );
+    const scopedService = new DefaultApiV1Service();
+    await expect(scopedService.getTask(taskId, "other-user")).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+    });
+    await expect(scopedService.getTask(taskId, "user-a")).resolves.toMatchObject({
+      task_id: taskId,
     });
 
     await repository.acquireTaskItemUploadLease({
@@ -206,6 +604,49 @@ mysqlTest("MySQL 数据层", () => {
         completed: true,
       }),
     ).rejects.toMatchObject({ status: 409 });
+  });
+
+  test("MCP 幂等键持久化原任务，并串行化同键并发请求", async () => {
+    const { databaseMcpIdempotencyStore } = await import(
+      "@/server/mcp/idempotency"
+    );
+    const taskId = crypto.randomUUID();
+    const now = new Date();
+    const handler = vi.fn(async () => {
+      await migrationConnection.db.insert(tasks).values({
+        id: taskId,
+        type: "publish",
+        userId: "user-001",
+        status: "queued",
+        phase: "publishing",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { task_id: taskId, status: "queued" };
+    });
+    const input = {
+      operation: "publish_asset",
+      userId: "user-001",
+      key: "publish-once",
+      request: { asset_id: crypto.randomUUID() },
+      retentionDays: 7,
+    };
+
+    const [first, concurrentReplay] = await Promise.all([
+      databaseMcpIdempotencyStore.run(input, handler),
+      databaseMcpIdempotencyStore.run(input, handler),
+    ]);
+    expect(first).toEqual({ task_id: taskId, status: "queued" });
+    expect(concurrentReplay).toEqual(first);
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    await expect(
+      databaseMcpIdempotencyStore.run(
+        { ...input, request: { asset_id: crypto.randomUUID() } },
+        handler,
+      ),
+    ).rejects.toMatchObject({ code: "conflict", status: 409 });
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 
   test("并发 PUT 只获得一个租约，中断后进度归零并可完整重试", async () => {
