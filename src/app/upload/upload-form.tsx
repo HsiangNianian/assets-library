@@ -14,9 +14,10 @@ import {
   XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { appUrl } from "@/lib/paths";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { UI_API_V1, uiApi } from "@/lib/api-v1-client";
+import { API_V1, apiV1 } from "@/lib/api-v1-client";
 import {
   MAX_UPLOAD_TASK_BYTES,
   MAX_UPLOAD_TASK_ITEMS,
@@ -46,7 +47,14 @@ interface UploadItem {
 }
 
 function localId() {
-  return globalThis.crypto.randomUUID();
+  const c = globalThis.crypto;
+  if (typeof c?.randomUUID === "function") return c.randomUUID();
+  const bytes = new Uint8Array(16);
+  c.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 const phaseLabels: Record<UploadPhase, string> = {
@@ -152,7 +160,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
             { once: true },
           );
         });
-        const next = await uiApi<TaskStatusResponse>(`/tasks/${taskId}`, {
+        const next = await apiV1<TaskStatusResponse>(`/tasks/${taskId}`, {
           signal: controller.signal,
         });
         applyTask(next);
@@ -185,7 +193,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
     });
     return new Promise<void>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("PUT", `${UI_API_V1}/uploads/${taskId}/items/${itemId}`);
+      xhr.open("PUT", `${API_V1}/uploads/${taskId}/items/${itemId}`);
       xhr.setRequestHeader(
         "content-type",
         item.file.type || "application/octet-stream",
@@ -234,7 +242,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
     setSubmitting(true);
     setError("");
     try {
-      const created = await uiApi<TaskStatusResponse>("/uploads", {
+      const created = await apiV1<TaskStatusResponse>("/uploads", {
         method: "POST",
         body: JSON.stringify({
           user_id: userId,
@@ -259,7 +267,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
       for (let index = 0; index < items.length; index += 1) {
         await sendItem(items[index]!, created.task_id, created.items[index]!.item_id);
       }
-      const sealed = await uiApi<TaskStatusResponse>(
+      const sealed = await apiV1<TaskStatusResponse>(
         `/uploads/${created.task_id}`,
         { method: "POST", body: JSON.stringify({}) },
       );
@@ -465,7 +473,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
                       )}
                       {item.assetIds[0] && (
                         <Link
-                          href={`/assets/${item.assetIds[0]}?user_id=${encodeURIComponent(userId)}`}
+                          href={appUrl(`/assets/${item.assetIds[0]}?user_id=${encodeURIComponent(userId)}`)}
                           className="mt-2 inline-flex text-xs font-medium text-cyan-700 hover:underline"
                         >
                           {item.assetIds.length > 1
