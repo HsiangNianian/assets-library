@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Pool, RowDataPacket } from "mysql2/promise";
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import {
@@ -17,6 +17,7 @@ import {
   mediaObjects,
   taskItems,
   tasks,
+  users,
   videoSources,
 } from "@/server/db/schema";
 import type { ObjectStorage } from "@/server/storage/object-storage";
@@ -53,6 +54,7 @@ const applicationTables = [
   "task_item_segments",
   "task_items",
   "tasks",
+  "users",
   "video_sources",
 ] as const;
 
@@ -106,6 +108,108 @@ mysqlTest("MySQL 数据层", () => {
     if (migrationConnection) await closeDatabase(migrationConnection);
   });
 
+  async function insertSchedulingTask(id: string, createdAt: Date) {
+    await migrationConnection.db.insert(tasks).values({
+      id,
+      type: "upload",
+      status: "running",
+      phase: "analyzing",
+      createdAt,
+      updatedAt: createdAt,
+    });
+  }
+
+  async function insertSchedulingJob(input: {
+    taskId: string;
+    type: "validate" | "analyze";
+    createdAt: Date;
+  }) {
+    const id = crypto.randomUUID();
+    await migrationConnection.db.insert(jobs).values({
+      id,
+      taskId: input.taskId,
+      type: input.type,
+      availableAt: input.createdAt,
+      createdAt: input.createdAt,
+      updatedAt: input.createdAt,
+    });
+    return id;
+  }
+
+  test("validate 作业优先于更早入队的 analyze 作业", async () => {
+    const now = new Date();
+    const analysisTaskId = crypto.randomUUID();
+    const validationTaskId = crypto.randomUUID();
+    await insertSchedulingTask(analysisTaskId, new Date(now.getTime() - 2_000));
+    await insertSchedulingTask(validationTaskId, new Date(now.getTime() - 1_000));
+    await insertSchedulingJob({
+      taskId: analysisTaskId,
+      type: "analyze",
+      createdAt: new Date(now.getTime() - 2_000),
+    });
+    const validationJobId = await insertSchedulingJob({
+      taskId: validationTaskId,
+      type: "validate",
+      createdAt: new Date(now.getTime() - 1_000),
+    });
+
+    await expect(repository.claimNextJob("priority-test")).resolves.toMatchObject({
+      id: validationJobId,
+      taskId: validationTaskId,
+      type: "validate",
+    });
+  });
+
+  test("并发领取时每个竞争任务最多占用两个分析 worker，独占队列后可突发", async () => {
+    const now = new Date();
+    const firstTaskId = crypto.randomUUID();
+    const secondTaskId = crypto.randomUUID();
+    await insertSchedulingTask(firstTaskId, new Date(now.getTime() - 2_000));
+    await insertSchedulingTask(secondTaskId, new Date(now.getTime() - 1_000));
+    for (let index = 0; index < 3; index += 1) {
+      await insertSchedulingJob({
+        taskId: firstTaskId,
+        type: "analyze",
+        createdAt: new Date(now.getTime() - 2_000 + index),
+      });
+      await insertSchedulingJob({
+        taskId: secondTaskId,
+        type: "analyze",
+        createdAt: new Date(now.getTime() - 1_000 + index),
+      });
+    }
+
+    const claimed = await Promise.all(
+      Array.from({ length: 4 }, (_, index) =>
+        repository.claimNextJob(`fairness-test:${index}`, {
+          analyzeTaskSoftLimit: 2,
+        }),
+      ),
+    );
+    const counts = new Map<string, number>();
+    for (const job of claimed) {
+      expect(job?.type).toBe("analyze");
+      if (job?.taskId) counts.set(job.taskId, (counts.get(job.taskId) ?? 0) + 1);
+    }
+    expect(counts.get(firstTaskId)).toBe(2);
+    expect(counts.get(secondTaskId)).toBe(2);
+    await expect(
+      repository.claimNextJob("fairness-test:blocked", {
+        analyzeTaskSoftLimit: 2,
+      }),
+    ).resolves.toBeNull();
+
+    await migrationConnection.db
+      .update(jobs)
+      .set({ status: "done", updatedAt: new Date() })
+      .where(and(eq(jobs.taskId, secondTaskId), eq(jobs.status, "queued")));
+    await expect(
+      repository.claimNextJob("fairness-test:burst", {
+        analyzeTaskSoftLimit: 2,
+      }),
+    ).resolves.toMatchObject({ taskId: firstTaskId, type: "analyze" });
+  });
+
   test("迁移生成完整的 MySQL 8 schema，并以 UTC/TLS 建立连接", async () => {
     const [tableRows] = await migrationConnection.pool.query<
       Array<RowDataPacket & { tableName: string }>
@@ -113,10 +217,25 @@ mysqlTest("MySQL 数据层", () => {
       `SELECT table_name AS tableName
          FROM information_schema.tables
         WHERE table_schema = DATABASE()
+          AND table_type = 'BASE TABLE'
           AND table_name <> '__drizzle_migrations'
         ORDER BY table_name`,
     );
     expect(tableRows.map((row) => row.tableName)).toEqual(applicationTables);
+
+    const [viewRows] = await migrationConnection.pool.query<
+      Array<RowDataPacket & { tableName: string }>
+    >(
+      `SELECT table_name AS tableName
+         FROM information_schema.views
+        WHERE table_schema = DATABASE()
+          AND table_name IN ('reporting_database_tables', 'reporting_user_assets')
+        ORDER BY table_name`,
+    );
+    expect(viewRows.map((row) => row.tableName)).toEqual([
+      "reporting_database_tables",
+      "reporting_user_assets",
+    ]);
 
     const inspection = await inspectDatabaseConnection(migrationConnection.pool);
     const [clockRows] = await migrationConnection.pool.query<
@@ -126,6 +245,85 @@ mysqlTest("MySQL 数据层", () => {
     );
     expect(Math.abs(Number(clockRows[0]?.utcDeltaSeconds ?? 60))).toBeLessThanOrEqual(1);
     expect(inspection.sslCipher).toBeTruthy();
+  });
+
+  test("注册用户列表保留零素材用户并忽略已删除素材", async () => {
+    const now = new Date("2026-08-20T01:02:03.000Z");
+    await migrationConnection.db.insert(users).values([
+      {
+        userId: "user-a",
+        displayName: "用户 A",
+        email: "user-a@example.com",
+        department: "剪辑",
+        firstSeenAt: now,
+        lastSeenAt: now,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        userId: "user-empty",
+        firstSeenAt: now,
+        lastSeenAt: now,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+    await migrationConnection.db.insert(assets).values([
+      {
+        id: crypto.randomUUID(),
+        userId: "user-a",
+        name: "active",
+        description: "",
+        mediaType: "image",
+        originalFilename: "active.jpg",
+        originalPath: "/tmp/active.jpg",
+        mimeType: "image/jpeg",
+        sizeBytes: 1,
+        reviewStatus: "published",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: crypto.randomUUID(),
+        userId: "user-a",
+        name: "deleted",
+        description: "",
+        mediaType: "image",
+        originalFilename: "deleted.jpg",
+        originalPath: "/tmp/deleted.jpg",
+        mimeType: "image/jpeg",
+        sizeBytes: 1,
+        reviewStatus: "deleted",
+        deletedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+
+    const registered = await repository.listRegisteredUsers();
+    expect(registered).toEqual([
+      expect.objectContaining({
+        userId: "user-a",
+        displayName: "用户 A",
+        email: "user-a@example.com",
+        department: "剪辑",
+        assetCount: 1,
+      }),
+      expect.objectContaining({ userId: "user-empty", assetCount: 0 }),
+    ]);
+
+    const { DefaultApiV1Service } = await import(
+      "@/server/api/v1/default-service"
+    );
+    await expect(new DefaultApiV1Service().listUsers()).resolves.toEqual([
+      expect.objectContaining({
+        user_id: "user-a",
+        display_name: "用户 A",
+        first_seen_at: "2026-08-20T09:02:03.000+08:00",
+        asset_count: 1,
+      }),
+      expect.objectContaining({ user_id: "user-empty", asset_count: 0 }),
+    ]);
   });
 
   test("流式上传进度在封存前不会误报完成，封存后创建校验作业", async () => {
@@ -153,6 +351,28 @@ mysqlTest("MySQL 数据层", () => {
           stagingPath: "/tmp/second.mp4",
         },
       ],
+    });
+
+    const [registeredUser] = await migrationConnection.db
+      .select()
+      .from(users)
+      .where(eq(users.userId, "user-a"));
+    expect(registeredUser).toMatchObject({
+      userId: "user-a",
+      displayName: null,
+      email: null,
+      department: null,
+    });
+    const { DefaultApiV1Service } = await import(
+      "@/server/api/v1/default-service"
+    );
+    const scopedService = new DefaultApiV1Service();
+    await expect(scopedService.getTask(taskId, "other-user")).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+    });
+    await expect(scopedService.getTask(taskId, "user-a")).resolves.toMatchObject({
+      task_id: taskId,
     });
 
     await repository.acquireTaskItemUploadLease({
