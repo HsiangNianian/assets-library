@@ -5,9 +5,11 @@ import {
   desc,
   eq,
   inArray,
+  isNotNull,
   isNull,
   lt,
   ne,
+  notInArray,
   or,
   sql,
   type SQL,
@@ -25,9 +27,15 @@ import {
   tags,
   taskItems,
   tasks,
+  users,
 } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
+import {
+  canClaimAnalyzeTask,
+  DEFAULT_ANALYZE_TASK_SOFT_LIMIT,
+} from "@/server/jobs/scheduling";
 import { searchAnalysis } from "@/server/search/chroma";
+import { apiV1Path } from "@/lib/paths";
 import {
   analysisResultSchema,
   type AssetDetail,
@@ -74,6 +82,7 @@ export interface CreateMutationTaskInput {
   assetId: string;
   userId?: string | null;
   callbackUrl?: string | null;
+  expiresAt?: Date | null;
   payload?: Record<string, unknown>;
 }
 
@@ -81,6 +90,7 @@ export interface CreateMutationTaskInput {
 export async function createMutationTask(input: CreateMutationTaskInput) {
   const taskId = input.id ?? crypto.randomUUID();
   const now = new Date();
+  const userId = input.userId?.trim() || null;
   const phase =
     input.type === "delete"
       ? "deleting"
@@ -90,14 +100,29 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
           ? "updating"
           : "retrying";
   await db.transaction(async (tx) => {
+    if (userId) {
+      await tx
+        .insert(users)
+        .values({
+          userId,
+          firstSeenAt: now,
+          lastSeenAt: now,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .onDuplicateKeyUpdate({
+          set: { lastSeenAt: now, updatedAt: now },
+        });
+    }
     await tx.insert(tasks).values({
       id: taskId,
       type: input.type,
       status: "queued",
       phase,
-      userId: input.userId?.trim() || null,
+      userId,
       callbackUrl: input.callbackUrl?.trim() || null,
       totalItems: 1,
+      expiresAt: input.expiresAt ?? null,
       createdAt: now,
       updatedAt: now,
     });
@@ -119,14 +144,29 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
 /** 在一个事务中创建异步任务及文件清单。 */
 export async function createTaskWithItems(manifest: CreateTaskManifest) {
   const now = new Date();
+  const userId = manifest.userId?.trim() || null;
   const items = manifest.items ?? [];
   const totalBytes = items.reduce((sum, item) => sum + item.totalBytes, 0);
   await db.transaction(async (tx) => {
+    if (userId) {
+      await tx
+        .insert(users)
+        .values({
+          userId,
+          firstSeenAt: now,
+          lastSeenAt: now,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .onDuplicateKeyUpdate({
+          set: { lastSeenAt: now, updatedAt: now },
+        });
+    }
     await tx.insert(tasks).values({
       id: manifest.id,
       type: manifest.type,
       phase: manifest.type === "upload" ? "receiving" : "queued",
-      userId: manifest.userId?.trim() || null,
+      userId,
       callbackUrl: manifest.callbackUrl?.trim() || null,
       totalBytes,
       totalItems: items.length,
@@ -164,6 +204,14 @@ export async function getTaskWithItems(taskId: string) {
     .where(eq(taskItems.taskId, taskId))
     .orderBy(asc(taskItems.ordinal));
   return { task, items };
+}
+
+/** 查询任务逐文件对应的素材 ID，供 API 展示层组装任务快照。 */
+export async function listTaskItemAssetIds(taskId: string) {
+  return db
+    .select({ id: assets.id, taskItemId: assets.taskItemId })
+    .from(assets)
+    .where(eq(assets.taskId, taskId));
 }
 
 /**
@@ -566,7 +614,7 @@ function summaryFromRow(
     processingStatus: row.processingStatus,
     reviewStatus: row.reviewStatus,
     tags: tagList,
-    mediaUrl: `/api/v1/media/${row.id}?v=${row.updatedAt.getTime()}`,
+    mediaUrl: `${apiV1Path(`/media/${row.id}`)}?v=${row.updatedAt.getTime()}`,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -845,6 +893,50 @@ export async function listUserMediaPage(
         ? { createdAt: lastItem.createdAt, assetId: lastItem.assetId }
         : null,
   };
+}
+
+export interface RegisteredUserUsage {
+  userId: string;
+  displayName: string | null;
+  email: string | null;
+  department: string | null;
+  firstSeenAt: Date;
+  lastSeenAt: Date;
+  assetCount: number;
+}
+
+/**
+ * 以 users 注册表为准列出用户资料及当前有效素材数。
+ * LEFT JOIN 保留还没有素材的用户，避免 MCP list_users 漏掉已注册身份。
+ */
+export async function listRegisteredUsers(): Promise<RegisteredUserUsage[]> {
+  return db
+    .select({
+      userId: users.userId,
+      displayName: users.displayName,
+      email: users.email,
+      department: users.department,
+      firstSeenAt: users.firstSeenAt,
+      lastSeenAt: users.lastSeenAt,
+      assetCount: sql<number>`count(${assets.id})`.mapWith(Number),
+    })
+    .from(users)
+    .leftJoin(
+      assets,
+      and(
+        eq(assets.userId, users.userId),
+        ne(assets.reviewStatus, "deleted"),
+      ),
+    )
+    .groupBy(
+      users.userId,
+      users.displayName,
+      users.email,
+      users.department,
+      users.firstSeenAt,
+      users.lastSeenAt,
+    )
+    .orderBy(desc(sql`count(${assets.id})`), asc(users.userId));
 }
 
 function intersectAssetIdSets(sets: ReadonlyArray<ReadonlySet<string>>) {
@@ -1681,61 +1773,235 @@ export interface ClaimedJob {
   type: typeof jobs.$inferSelect.type;
   attempt: number;
   payload: Record<string, unknown> | null;
+  availableAt?: Date;
+  createdAt?: Date;
+  claimedAt?: Date | null;
+  leaseOwner?: string | null;
+}
+
+export interface ClaimNextJobOptions {
+  analyzeTaskSoftLimit?: number;
+}
+
+type JobTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type JobRow = typeof jobs.$inferSelect;
+
+const nonAnalysisClaimableTypes = [
+  "embed",
+  "delete",
+  "cleanup",
+  "callback",
+  "publish",
+  "update",
+  "retry",
+] as const;
+
+async function claimQueuedJob(
+  tx: JobTransaction,
+  row: JobRow,
+  leaseOwner: string,
+  now: Date,
+): Promise<ClaimedJob | null> {
+  const attempt = row.attempt + 1;
+  const updated = await tx
+    .update(jobs)
+    .set({
+      status: "running",
+      claimedAt: now,
+      leaseOwner,
+      attempt,
+      updatedAt: now,
+    })
+    .where(and(eq(jobs.id, row.id), eq(jobs.status, "queued")));
+  if (affectedRows(updated) !== 1) return null;
+  return {
+    id: row.id,
+    taskId: row.taskId,
+    assetId: row.assetId,
+    type: row.type,
+    attempt,
+    payload: row.payload,
+    availableAt: row.availableAt,
+    createdAt: row.createdAt,
+    claimedAt: now,
+    leaseOwner,
+  };
+}
+
+async function selectPriorityValidationJob(tx: JobTransaction, now: Date) {
+  const [row] = await tx
+    .select()
+    .from(jobs)
+    .where(
+      and(
+        eq(jobs.status, "queued"),
+        eq(jobs.type, "validate"),
+        sql`${jobs.availableAt} <= ${now}`,
+      ),
+    )
+    .orderBy(asc(jobs.createdAt))
+    .limit(1)
+    .for("update", { skipLocked: true });
+  return row ?? null;
 }
 
 /**
- * 并发安全领取一个作业。SKIP LOCKED 允许多个 worker 横向扩展且互不阻塞。
+ * 为分析作业锁定一个任务行后再计算并发数，确保多个 worker 同时领取时不会共同
+ * 穿透软上限。任务之间按最早等待作业排序；并发 worker 等待同一个候选任务的
+ * 短事务提交后重新计算配额，避免把“候选暂时被锁”误判为“队列为空”。
  */
-export async function claimNextJob(
-  leaseOwner = `${process.pid}`,
-): Promise<ClaimedJob | null> {
-  const now = new Date();
-  return db.transaction(
-    async (tx) => {
+async function selectFairAnalysisJob(
+  tx: JobTransaction,
+  now: Date,
+  softLimit: number,
+) {
+  const excludedTaskIds: string[] = [];
+  for (;;) {
+    const conditions: SQL[] = [
+      sql`exists (
+        select 1
+          from jobs as queued_analysis
+         where queued_analysis.task_id = ${tasks.id}
+           and queued_analysis.type = 'analyze'
+           and queued_analysis.status = 'queued'
+           and queued_analysis.available_at <= ${now}
+      )`,
+    ];
+    if (excludedTaskIds.length) {
+      conditions.push(notInArray(tasks.id, excludedTaskIds));
+    }
+    const [candidateTask] = await tx
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(and(...conditions))
+      .orderBy(
+        sql`(
+          select min(queued_analysis.created_at)
+            from jobs as queued_analysis
+           where queued_analysis.task_id = ${tasks.id}
+             and queued_analysis.type = 'analyze'
+             and queued_analysis.status = 'queued'
+             and queued_analysis.available_at <= ${now}
+        )`,
+      )
+      .limit(1);
+    if (!candidateTask) return null;
+
+    // 候选查询会使用 status/created_at 等二级索引。直接在该查询上 FOR UPDATE
+    // 会形成“二级索引 -> 主键”的加锁顺序，而 mutation worker 更新 task 时是
+    // “主键 -> 二级索引”，高并发下会产生 InnoDB 死锁。先无锁选候选，再通过
+    // 主键锁定具体 task；等待锁后重新检查作业状态和并发计数即可保持公平性。
+    const [lockedTask] = await tx
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(eq(tasks.id, candidateTask.id))
+      .limit(1)
+      .for("update");
+    if (!lockedTask) {
+      excludedTaskIds.push(candidateTask.id);
+      continue;
+    }
+
+    const [runningRow] = await tx
+      .select({ value: sql<number>`count(*)`.mapWith(Number) })
+      .from(jobs)
+      .where(
+        and(
+          eq(jobs.taskId, candidateTask.id),
+          eq(jobs.type, "analyze"),
+          eq(jobs.status, "running"),
+        ),
+      );
+    const [competingJob] = await tx
+      .select({ id: jobs.id })
+      .from(jobs)
+      .where(
+        and(
+          eq(jobs.type, "analyze"),
+          eq(jobs.status, "queued"),
+          sql`${jobs.availableAt} <= ${now}`,
+          isNotNull(jobs.taskId),
+          ne(jobs.taskId, candidateTask.id),
+        ),
+      )
+      .limit(1);
+    if (
+      canClaimAnalyzeTask(
+        runningRow?.value ?? 0,
+        Boolean(competingJob),
+        softLimit,
+      )
+    ) {
       const [row] = await tx
         .select()
         .from(jobs)
         .where(
           and(
+            eq(jobs.taskId, candidateTask.id),
+            eq(jobs.type, "analyze"),
             eq(jobs.status, "queued"),
-            inArray(jobs.type, [
-              "validate",
-              "analyze",
-              "embed",
-              "delete",
-              "cleanup",
-              "callback",
-              "publish",
-              "update",
-              "retry",
-            ]),
             sql`${jobs.availableAt} <= ${now}`,
           ),
         )
         .orderBy(asc(jobs.createdAt))
         .limit(1)
         .for("update", { skipLocked: true });
-      if (!row) return null;
-      const attempt = row.attempt + 1;
-      const updated = await tx
-        .update(jobs)
-        .set({
-          status: "running",
-          claimedAt: now,
-          leaseOwner,
-          attempt,
-          updatedAt: now,
-        })
-        .where(and(eq(jobs.id, row.id), eq(jobs.status, "queued")));
-      if (affectedRows(updated) !== 1) return null;
-      return {
-        id: row.id,
-        taskId: row.taskId,
-        assetId: row.assetId,
-        type: row.type,
-        attempt,
-        payload: row.payload,
-      };
+      if (row) return row;
+    }
+    excludedTaskIds.push(candidateTask.id);
+  }
+}
+
+async function selectOtherQueuedJob(tx: JobTransaction, now: Date) {
+  const [row] = await tx
+    .select()
+    .from(jobs)
+    .where(
+      and(
+        eq(jobs.status, "queued"),
+        or(
+          inArray(jobs.type, nonAnalysisClaimableTypes),
+          and(eq(jobs.type, "analyze"), isNull(jobs.taskId)),
+        ),
+        sql`${jobs.availableAt} <= ${now}`,
+      ),
+    )
+    .orderBy(asc(jobs.createdAt))
+    .limit(1)
+    .for("update", { skipLocked: true });
+  return row ?? null;
+}
+
+/**
+ * 并发安全领取一个作业：validate 始终优先；其余类型保持 FIFO；多个任务竞争时，
+ * analyze 按任务执行软并发上限，单任务独占队列时可突发使用全部全局 worker。
+ */
+export async function claimNextJob(
+  leaseOwner = `${process.pid}`,
+  options: ClaimNextJobOptions = {},
+): Promise<ClaimedJob | null> {
+  const now = new Date();
+  const softLimit =
+    options.analyzeTaskSoftLimit ?? DEFAULT_ANALYZE_TASK_SOFT_LIMIT;
+  if (!Number.isInteger(softLimit) || softLimit < 1) {
+    throw new Error("analyzeTaskSoftLimit 必须是大于 0 的整数。");
+  }
+  return db.transaction(
+    async (tx) => {
+      const validation = await selectPriorityValidationJob(tx, now);
+      if (validation) {
+        return claimQueuedJob(tx, validation, leaseOwner, now);
+      }
+
+      const analysis = await selectFairAnalysisJob(tx, now, softLimit);
+      const other = await selectOtherQueuedJob(tx, now);
+      const row =
+        analysis && other
+          ? analysis.createdAt.getTime() <= other.createdAt.getTime()
+            ? analysis
+            : other
+          : (analysis ?? other);
+      return row ? claimQueuedJob(tx, row, leaseOwner, now) : null;
     },
     { isolationLevel: "read committed" },
   );
@@ -1824,20 +2090,50 @@ export async function requeueFailedEmbeddingJobs() {
   return affectedRows(result);
 }
 
+/** recoverStaleJobs 单批最多处理的行数，避免单次范围 UPDATE 长时间持锁。 */
+const STALE_JOB_BATCH_SIZE = 50;
+
+/**
+ * 把超时仍处于 running 的作业重置为 queued，供其他 worker 重新领取。
+ *
+ * 原实现用一次范围 UPDATE（status + claimedAt 区间）锁定大批行，与并发的
+ * 作业 INSERT 事务互锁导致偶发死锁（1213/1205）。这里改为在单个事务里用
+ * FOR UPDATE SKIP LOCKED 分批选中要恢复的作业，再按主键逐行 UPDATE，
+ * 锁粒度从索引区间缩小到单行，且 SKIP LOCKED 让已被领取的行直接跳过。
+ */
 export async function recoverStaleJobs(staleAfterMs = 2 * 60_000) {
   const now = new Date();
   const stale = new Date(now.getTime() - staleAfterMs);
-  const result = await db
-    .update(jobs)
-    .set({
-      status: "queued",
-      claimedAt: null,
-      leaseOwner: null,
-      availableAt: now,
-      updatedAt: now,
-    })
-    .where(and(eq(jobs.status, "running"), lt(jobs.claimedAt, stale)));
-  return affectedRows(result);
+  let recovered = 0;
+  for (;;) {
+    const batch = await db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ id: jobs.id })
+        .from(jobs)
+        .where(and(eq(jobs.status, "running"), lt(jobs.claimedAt, stale)))
+        .orderBy(asc(jobs.claimedAt))
+        .limit(STALE_JOB_BATCH_SIZE)
+        .for("update", { skipLocked: true });
+      let updated = 0;
+      for (const row of rows) {
+        const result = await tx
+          .update(jobs)
+          .set({
+            status: "queued",
+            claimedAt: null,
+            leaseOwner: null,
+            availableAt: now,
+            updatedAt: now,
+          })
+          .where(and(eq(jobs.id, row.id), eq(jobs.status, "running")));
+        updated += affectedRows(result);
+      }
+      return updated;
+    });
+    if (batch === 0) break;
+    recovered += batch;
+  }
+  return recovered;
 }
 
 /**
