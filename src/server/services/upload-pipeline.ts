@@ -13,9 +13,17 @@ import {
   videoSources,
 } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
-import { resolveMediaPath } from "@/server/media/storage";
+import {
+  removeAnalysisWorkspace,
+  resolveMediaPath,
+  seedAnalysisVideoFrames,
+} from "@/server/media/storage";
 import { validateMediaFile } from "@/server/media/validate";
-import { prepareSceneBatch, cleanupPreparedSceneBatch } from "@/server/scene/batch";
+import {
+  prepareSceneBatch,
+  cleanupPreparedSceneBatch,
+  type PreparedSceneSegment,
+} from "@/server/scene/batch";
 import { SceneDetectClient } from "@/server/scene/client";
 import { ScenePipelineError } from "@/server/scene/types";
 import {
@@ -54,6 +62,7 @@ function defaultDependencies(): UploadPipelineDependencies {
     sceneClient: new SceneDetectClient({
       baseUrl: config.SCENE_DETECT_BASE_URL,
       timeoutMs: config.SCENE_DETECT_TIMEOUT_MS,
+      pollIntervalMs: config.SCENE_DETECT_POLL_INTERVAL_MS,
     }),
     now: () => new Date(),
   };
@@ -65,6 +74,51 @@ function taskItemId(job: ClaimedJob) {
     throw new AppError("invalid_request", "校验作业缺少 taskItemId。", 500);
   }
   return value;
+}
+
+interface SegmentAnalysisPlan {
+  prepared: PreparedSceneSegment;
+  analysisJobId: string;
+}
+
+/**
+ * 分析作业只有在帧工作区完整落盘后才能进入数据库；后续事务失败时也必须
+ * 回收已经写入的工作区，避免留下永远不会被 worker 消费的孤儿目录。
+ */
+async function withSeededAnalysisWorkspaces<T>(
+  plans: readonly SegmentAnalysisPlan[],
+  mediaRoot: string,
+  operation: () => Promise<T>,
+) {
+  const seededJobIds = new Set<string>();
+  try {
+    const seedResults = await Promise.allSettled(
+      plans.map(async ({ analysisJobId, prepared }) => {
+        await seedAnalysisVideoFrames(
+          analysisJobId,
+          ".mp4",
+          prepared.analysisFramesDirectory,
+          mediaRoot,
+        );
+        seededJobIds.add(analysisJobId);
+      }),
+    );
+    const failedSeed = seedResults.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failedSeed) throw failedSeed.reason;
+    return await operation();
+  } catch (error) {
+    const cleanupResults = await Promise.allSettled(
+      [...seededJobIds].map((jobId) =>
+        removeAnalysisWorkspace(jobId, mediaRoot),
+      ),
+    );
+    if (cleanupResults.some((result) => result.status === "rejected")) {
+      console.error("视频分析关键帧工作区回滚不完整。");
+    }
+    throw error;
+  }
 }
 
 async function uploadContext(job: ClaimedJob): Promise<UploadContext> {
@@ -244,26 +298,52 @@ async function processVideo(
     originalFilename: context.item.filename,
     workspaceRoot: dependencies.config.sceneDetectWorkspaceRoot,
     maximumSegmentBytes: dependencies.config.SCENE_SEGMENT_MAX_BYTES,
+    concurrency: dependencies.config.SCENE_SEGMENT_CONCURRENCY,
   });
+  const segmentPlans = new Map(
+    batch.segments.map(
+      (prepared) =>
+        [
+          prepared.index,
+          {
+            prepared,
+            mediaId: crypto.randomUUID(),
+            thumbnailMediaId: crypto.randomUUID(),
+            segmentId: crypto.randomUUID(),
+            assetId: crypto.randomUUID(),
+            analysisJobId: crypto.randomUUID(),
+          },
+        ] as const,
+    ),
+  );
   try {
     await markTaskItemRunning(context.task.id, context.item.id, "persisting");
     await persistSceneBatch({
       batch,
       storage: dependencies.storage,
+      concurrency: dependencies.config.SCENE_PERSIST_CONCURRENCY,
       now: dependencies.now(),
       commitDatabase: async (persisted) => {
         const now = dependencies.now();
         const sourceId = crypto.randomUUID();
         const parentMediaId = crypto.randomUUID();
-        const segmentRows = persisted.segments.map((segment) => ({
-          segment,
-          mediaId: crypto.randomUUID(),
-          thumbnailMediaId: crypto.randomUUID(),
-          segmentId: crypto.randomUUID(),
-          assetId: crypto.randomUUID(),
-        }));
-        // 整批父视频、切片对象、素材和分析作业在单个事务中同时可见。
-        await db.transaction(async (tx) => {
+        const segmentRows = persisted.segments.map((segment) => {
+          const plan = segmentPlans.get(segment.index);
+          if (!plan) {
+            throw new ScenePipelineError(
+              "scene_persistence_failed",
+              `分镜 ${segment.index} 缺少分析作业规划。`,
+            );
+          }
+          return { segment, ...plan };
+        });
+        // analyze 作业一旦提交即可被其他 worker 领取，所以必须先原子准备好帧种子。
+        await withSeededAnalysisWorkspaces(
+          segmentRows,
+          dependencies.config.mediaRoot,
+          async () => {
+            // 整批父视频、切片对象、素材和分析作业在单个事务中同时可见。
+          await db.transaction(async (tx) => {
           await tx.insert(mediaObjects).values([
             mediaObjectValues(
               parentMediaId,
@@ -301,6 +381,7 @@ async function processVideo(
             mimeType: "video/mp4",
             sizeBytes: persisted.parentObject.sizeBytes,
             durationMs: Math.round(batch.durationSeconds * 1_000),
+            generatedSegmentCount: segmentRows.length,
             status: "done",
             createdAt: now,
             updatedAt: now,
@@ -351,8 +432,8 @@ async function processVideo(
             ),
           );
           await tx.insert(jobs).values(
-            segmentRows.map(({ assetId }) => ({
-              id: crypto.randomUUID(),
+            segmentRows.map(({ assetId, analysisJobId }) => ({
+              id: analysisJobId,
               taskId: context.task.id,
               assetId,
               type: "analyze" as const,
@@ -381,7 +462,9 @@ async function processVideo(
               updatedAt: now,
             })
             .where(eq(taskItems.id, context.item.id));
-        });
+          });
+          },
+        );
       },
     });
   } finally {

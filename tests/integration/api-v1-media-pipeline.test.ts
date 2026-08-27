@@ -56,6 +56,7 @@ const applicationTables = [
   "task_item_segments",
   "task_items",
   "tasks",
+  "users",
   "video_sources",
 ] as const;
 
@@ -98,6 +99,7 @@ function body(bytes: Uint8Array) {
 /** CI 中的 ZOS 替身保存真实媒体字节，并提供与生产适配器相同的下载语义。 */
 class MemoryObjectStorage implements ObjectStorage {
   readonly objects = new Map<string, { bytes: Buffer; contentType: string }>();
+  readonly downloads: string[] = [];
 
   async storeFile(input: StoreFileInput) {
     const bytes = await fs.readFile(input.filePath);
@@ -134,6 +136,7 @@ class MemoryObjectStorage implements ObjectStorage {
   }
 
   async downloadToFile(key: string, destinationPath: string) {
+    this.downloads.push(key);
     const object = this.required(key);
     await fs.mkdir(path.dirname(destinationPath), { recursive: true });
     await fs.writeFile(destinationPath, object.bytes);
@@ -429,7 +432,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     const fake = fakeSceneClient(manifest, segments);
     const { SceneDetectClient } = await import("@/server/scene/client");
     const client = new SceneDetectClient({
-      baseUrl: "http://127.0.0.1:28200",
+      baseUrl: "https://your.com",
       timeoutMs: 10_000,
       fetchImplementation: fake.request,
     });
@@ -466,6 +469,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
       .where(eq(schema.videoSources.taskId, taskId));
     const analysisRows = await database.db.select().from(schema.analysisResults);
     expect(sourceRows).toHaveLength(1);
+    expect(sourceRows[0]?.generatedSegmentCount).toBe(2);
     expect(assetRows).toHaveLength(2);
     expect(assetRows.map((row) => row.segmentIndex).sort()).toEqual([1, 2]);
     expect(assetRows.every((row) => row.sizeBytes <= 10 * 1024 * 1024)).toBe(true);
@@ -475,7 +479,8 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     expect(assetRows.every((row) => row.processingStatus === "completed")).toBe(true);
     expect(analysisRows).toHaveLength(2);
     expect(analysisRows.every((row) => row.resultJson.kind === "video")).toBe(true);
-    expect(framePreparation).toHaveBeenCalledTimes(2);
+    expect(framePreparation).not.toHaveBeenCalled();
+    expect(storage.downloads).toEqual([]);
     expect(storage.objects.size).toBe(5); // 1 个父对象 + 2 个切片 + 2 张首帧
     for (const asset of assetRows) {
       const [thumbnail] = await database.db
@@ -556,7 +561,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     expect(storage.objects.size).toBe(3);
   }, 45_000);
 
-  test("任一切片超过 10 MiB 时整批失败，不创建 asset、父视频或媒体对象记录", async () => {
+  test("任一切片超过 10 MiB 时本地二次切分后正常入库，不下载远端切片", async () => {
     const parentPath = path.join(temporaryRoot, "oversize-parent.mp4");
     await createVideo(parentPath, "black", 0.4);
     const parentBytes = await fs.readFile(parentPath);
@@ -568,7 +573,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     const fake = fakeSceneClient(manifest, [advertised]);
     const { SceneDetectClient } = await import("@/server/scene/client");
     const client = new SceneDetectClient({
-      baseUrl: "http://127.0.0.1:28200",
+      baseUrl: "https://your.com",
       timeoutMs: 10_000,
       fetchImplementation: fake.request,
     });
@@ -580,30 +585,24 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     await processUntilIdle(client);
     const status = await service.getTask(taskId);
     expect(status).toMatchObject({
-      status: "failed",
+      status: "done",
       phase: "finished",
-      done_items: 0,
-      failed_items: 1,
+      done_items: 1,
+      failed_items: 0,
     });
     expect(status.items[0]).toMatchObject({
-      status: "failed",
-      phase: "finished",
-      asset_ids: [],
-      error: {
-        code: "segment_too_large",
-        details: [
-          expect.objectContaining({
-            segment_index: 1,
-            size_bytes: limit + 1,
-            limit_bytes: limit,
-          }),
-        ],
-      },
+      status: "done",
+      asset_ids: [expect.any(String)],
     });
-    expect(await database.db.select().from(schema.assets)).toHaveLength(0);
-    expect(await database.db.select().from(schema.videoSources)).toHaveLength(0);
-    expect(await database.db.select().from(schema.mediaObjects)).toHaveLength(0);
-    expect(storage.objects.size).toBe(0);
+    const assets = await database.db.select().from(schema.assets);
+    const sources = await database.db.select().from(schema.videoSources);
+    const objects = await database.db.select().from(schema.mediaObjects);
+    expect(assets).toHaveLength(1);
+    expect(sources).toHaveLength(1);
+    expect(objects).toHaveLength(3); // 父视频 + 切分子视频 + 缩略图
+    expect(assets[0]!.sizeBytes).toBeLessThanOrEqual(limit);
+    expect(storage.objects.size).toBe(3);
+    // 二次切分不下载远端超限切片，只下载/校验本地子切片
     expect(
       fake.request.mock.calls.some(([input]) =>
         String(input).includes("/segments/1"),
