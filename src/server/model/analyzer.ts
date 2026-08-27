@@ -677,6 +677,8 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
         try {
           return parseAnalysisText(text, media.durationSeconds);
         } catch (error) {
+          const parseErrorMessage =
+            error instanceof Error ? error.message : String(error);
           auditLog("vlm_response_parse_failed", {
             model: model.name,
             media_type: input.mediaType,
@@ -685,8 +687,12 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
             response_chars: text.length,
             response_sha256: createHash("sha256").update(text).digest("hex"),
             response_has_code_fence: /^\s*```/.test(text),
-            parse_error:
-              error instanceof Error ? error.message : String(error),
+            parse_error_type: error instanceof Error ? error.name : typeof error,
+            parse_error: parseErrorMessage,
+            parse_error_chars: parseErrorMessage.length,
+            parse_error_sha256: createHash("sha256")
+              .update(parseErrorMessage)
+              .digest("hex"),
           }, "warn");
           if (correctionUsed) throw new AppError("model_response_invalid");
           correctionUsed = true;
