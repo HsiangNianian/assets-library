@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { and, eq, inArray, ne } from "drizzle-orm";
 import { db } from "@/server/db";
+import { withDeadlockRetry } from "@/server/db/retry";
 import {
   assets,
   jobs,
@@ -8,6 +9,7 @@ import {
   tasks,
   videoSources,
 } from "@/server/db/schema";
+import { loadConfig } from "@/server/config";
 import { AppError } from "@/server/errors";
 import {
   completeJob,
@@ -31,13 +33,27 @@ function stringPayload(job: ClaimedJob, key: string) {
   return typeof value === "string" ? value : null;
 }
 
-function scopeForJob(job: ClaimedJob): AssetScope {
-  const userId = stringPayload(job, "userId")?.trim();
-  return userId ? { userId } : { userId: null };
+/**
+ * 从 job payload 获取 userId；若 payload 中缺失（API 未传 user_id），
+ * 则回退到数据库查出资产的实际归属，避免 worker 用 null scope 匹配不到
+ * 用户私有资产。
+ */
+async function resolveScopeForJob(job: ClaimedJob): Promise<AssetScope> {
+  const payloadUserId = stringPayload(job, "userId")?.trim();
+  if (payloadUserId) return { userId: payloadUserId };
+  const assetId = job.assetId ?? stringPayload(job, "assetId");
+  if (!assetId) return { userId: null };
+  const [row] = await db
+    .select({ userId: assets.userId })
+    .from(assets)
+    .where(eq(assets.id, assetId))
+    .limit(1);
+  return row ? { userId: row.userId } : { userId: null };
 }
 
 async function markMutationRunning(job: ClaimedJob) {
   if (!job.taskId) throw new AppError("invalid_request", "变更作业缺少 taskId。", 500);
+  const taskId = job.taskId;
   const phase =
     job.type === "delete"
       ? "deleting"
@@ -46,15 +62,21 @@ async function markMutationRunning(job: ClaimedJob) {
         : job.type === "update"
           ? "updating"
           : "retrying";
-  await db
-    .update(tasks)
-    .set({
-      status: "running",
-      phase,
-      startedAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(eq(tasks.id, job.taskId));
+  await withDeadlockRetry(
+    () => {
+      const now = new Date();
+      return db
+        .update(tasks)
+        .set({
+          status: "running",
+          phase,
+          startedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(tasks.id, taskId));
+    },
+    { attempts: 5, backoffMs: 25 },
+  );
 }
 
 function updatePayload(job: ClaimedJob): AssetEdit {
@@ -81,7 +103,8 @@ async function queueRetryAnalysis(job: ClaimedJob) {
       .where(eq(assets.id, assetId))
       .for("update")
       .limit(1);
-    const expectedUserId = stringPayload(job, "userId")?.trim() || null;
+    const payloadUserId = stringPayload(job, "userId")?.trim() || null;
+    const expectedUserId = payloadUserId ?? asset?.userId ?? null;
     if (
       !asset ||
       asset.reviewStatus === "deleted" ||
@@ -310,6 +333,27 @@ async function finalizePublicAssetDeletion(
   });
 }
 
+/**
+ * 开关 ZOS_DELETE_BEST_EFFORT=true 时，对象删除失败只告警不抛出，
+ * 硬删除仅回收数据库记录；未开启时保持原有的严格删除语义。
+ */
+async function deleteObjectBestEffort(
+  storage: ObjectStorage,
+  key: string | undefined,
+  bestEffort: boolean,
+) {
+  if (!key) return;
+  try {
+    await storage.deleteObject(key);
+  } catch (error) {
+    if (bestEffort) {
+      console.warn(`跳过 ZOS 对象删除（ZOS_DELETE_BEST_EFFORT）：${key}`, error);
+      return;
+    }
+    throw error;
+  }
+}
+
 async function hardDeletePublicAsset(
   assetId: string,
   storage: ObjectStorage,
@@ -318,16 +362,21 @@ async function hardDeletePublicAsset(
   if (record.alreadyGone) {
     return { released_to_public: false, parent_video_reclaimed: false };
   }
+  const bestEffort = loadConfig().ZOS_DELETE_BEST_EFFORT === "true";
 
   // 外部对象先幂等删除；若进程中断，隐藏的 deleted 行可由同一任务重试收尾。
   await deleteAnalysis(assetId);
-  if (record.object) await storage.deleteObject(record.object.objectKey);
-  if (record.thumbnailObject) {
-    await storage.deleteObject(record.thumbnailObject.objectKey);
-  }
-  if (record.parent?.object) {
-    await storage.deleteObject(record.parent.object.objectKey);
-  }
+  await deleteObjectBestEffort(storage, record.object?.objectKey, bestEffort);
+  await deleteObjectBestEffort(
+    storage,
+    record.thumbnailObject?.objectKey,
+    bestEffort,
+  );
+  await deleteObjectBestEffort(
+    storage,
+    record.parent?.object?.objectKey,
+    bestEffort,
+  );
 
   await finalizePublicAssetDeletion(assetId, record);
   return { released_to_public: false, parent_video_reclaimed: Boolean(record.parent) };
@@ -336,7 +385,16 @@ async function hardDeletePublicAsset(
 async function deleteAsset(job: ClaimedJob, storage: ObjectStorage) {
   const assetId = job.assetId ?? stringPayload(job, "assetId");
   if (!assetId) throw new AppError("invalid_request", "删除作业缺少素材标识。", 500);
-  const userId = stringPayload(job, "userId")?.trim();
+  const payloadUserId = stringPayload(job, "userId")?.trim() ?? null;
+  let userId: string | null = payloadUserId;
+  if (!userId) {
+    const [row] = await db
+      .select({ userId: assets.userId })
+      .from(assets)
+      .where(eq(assets.id, assetId))
+      .limit(1);
+    userId = row?.userId ?? null;
+  }
   if (userId) {
     await releaseAssetToPublic(assetId, userId);
     return { released_to_public: true, parent_video_reclaimed: false };
@@ -361,10 +419,12 @@ export async function processMutationJob(
     }
     let result: Record<string, unknown>;
     if (job.type === "update") {
-      await updateAssetMetadata(assetId, updatePayload(job), scopeForJob(job));
+      const scope = await resolveScopeForJob(job);
+      await updateAssetMetadata(assetId, updatePayload(job), scope);
       result = { asset_id: assetId };
     } else if (job.type === "publish") {
-      await publishAsset(assetId, scopeForJob(job));
+      const scope = await resolveScopeForJob(job);
+      await publishAsset(assetId, scope);
       result = { asset_id: assetId, review_status: "published" };
     } else if (job.type === "delete") {
       result = { asset_id: assetId, ...(await deleteAsset(job, storage)) };
