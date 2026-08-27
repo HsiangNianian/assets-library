@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import {
   loadConfig,
   type AppConfig,
@@ -7,6 +8,7 @@ import {
   type ModelTarget,
 } from "@/server/config";
 import { AppError } from "@/server/errors";
+import { auditLog } from "@/server/observability/audit-log";
 import {
   readVideoFrameSet,
   resolveMediaPath,
@@ -451,6 +453,13 @@ function extractChatText(payload: unknown) {
   const content = candidate.choices?.[0]?.message?.content;
   if (typeof content === "string") return content;
   if (Array.isArray(content)) return content.map((item) => item.text ?? "").join("");
+  auditLog("vlm_extract_chat_text_failed", {
+    payload_keys: Object.keys(candidate),
+    choices_length: candidate.choices?.length,
+    first_choice: candidate.choices?.[0]
+      ? { message_keys: Object.keys(candidate.choices[0].message ?? {}) }
+      : null,
+  }, "warn");
   throw new AppError("model_response_invalid");
 }
 
@@ -465,6 +474,11 @@ function extractResponsesText(payload: unknown) {
     .map((item) => item.text ?? "")
     .join("");
   if (text) return text;
+  auditLog("vlm_extract_responses_text_failed", {
+    payload_keys: Object.keys(candidate),
+    has_output_text: typeof candidate.output_text,
+    output_length: candidate.output?.length,
+  }, "warn");
   throw new AppError("model_response_invalid");
 }
 
@@ -663,6 +677,17 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
         try {
           return parseAnalysisText(text, media.durationSeconds);
         } catch (error) {
+          auditLog("vlm_response_parse_failed", {
+            model: model.name,
+            media_type: input.mediaType,
+            asset_id: input.assetId,
+            correction_used: correctionUsed,
+            response_chars: text.length,
+            response_sha256: createHash("sha256").update(text).digest("hex"),
+            response_has_code_fence: /^\s*```/.test(text),
+            parse_error:
+              error instanceof Error ? error.message : String(error),
+          }, "warn");
           if (correctionUsed) throw new AppError("model_response_invalid");
           correctionUsed = true;
           invalidText = text;
