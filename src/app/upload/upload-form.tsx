@@ -14,9 +14,11 @@ import {
   XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { appUrl } from "@/lib/paths";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { UI_API_V1, uiApi } from "@/lib/api-v1-client";
+import { API_V1, apiV1 } from "@/lib/api-v1-client";
+import { createLocalId } from "@/lib/local-id";
 import {
   MAX_UPLOAD_TASK_BYTES,
   MAX_UPLOAD_TASK_ITEMS,
@@ -43,10 +45,6 @@ interface UploadItem {
   progress: number;
   assetIds: string[];
   error: string;
-}
-
-function localId() {
-  return globalThis.crypto.randomUUID();
 }
 
 const phaseLabels: Record<UploadPhase, string> = {
@@ -152,7 +150,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
             { once: true },
           );
         });
-        const next = await uiApi<TaskStatusResponse>(`/tasks/${taskId}`, {
+        const next = await apiV1<TaskStatusResponse>(`/tasks/${taskId}`, {
           signal: controller.signal,
         });
         applyTask(next);
@@ -185,7 +183,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
     });
     return new Promise<void>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("PUT", `${UI_API_V1}/uploads/${taskId}/items/${itemId}`);
+      xhr.open("PUT", `${API_V1}/uploads/${taskId}/items/${itemId}`);
       xhr.setRequestHeader(
         "content-type",
         item.file.type || "application/octet-stream",
@@ -234,7 +232,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
     setSubmitting(true);
     setError("");
     try {
-      const created = await uiApi<TaskStatusResponse>("/uploads", {
+      const created = await apiV1<TaskStatusResponse>("/uploads", {
         method: "POST",
         body: JSON.stringify({
           user_id: userId,
@@ -259,7 +257,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
       for (let index = 0; index < items.length; index += 1) {
         await sendItem(items[index]!, created.task_id, created.items[index]!.item_id);
       }
-      const sealed = await uiApi<TaskStatusResponse>(
+      const sealed = await apiV1<TaskStatusResponse>(
         `/uploads/${created.task_id}`,
         { method: "POST", body: JSON.stringify({}) },
       );
@@ -290,7 +288,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
       const previewUrl = URL.createObjectURL(file);
       previewUrlsRef.current.add(previewUrl);
       return {
-        id: localId(),
+        id: createLocalId(),
         serverItemId: null,
         file,
         previewUrl,
@@ -465,7 +463,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
                       )}
                       {item.assetIds[0] && (
                         <Link
-                          href={`/assets/${item.assetIds[0]}?user_id=${encodeURIComponent(userId)}`}
+                          href={appUrl(`/assets/${item.assetIds[0]}?user_id=${encodeURIComponent(userId)}`)}
                           className="mt-2 inline-flex text-xs font-medium text-cyan-700 hover:underline"
                         >
                           {item.assetIds.length > 1
