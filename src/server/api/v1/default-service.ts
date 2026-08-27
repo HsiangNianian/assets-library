@@ -127,7 +127,6 @@ export class DefaultApiV1Service implements ApiV1Service {
   listUserMedia(userId: string, input: UserMediaListQuery, origin: string) {
     return this.services.users.listUserMedia(userId, input, origin);
   }
-
   getAsset(assetId: string, scope: UserScope) {
     return this.services.assets.getAsset(assetId, scope);
   }

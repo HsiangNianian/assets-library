@@ -14,13 +14,13 @@ import {
 } from "lucide-react";
 import { MediaPreview } from "@/components/media-preview";
 import { Badge } from "@/components/ui/badge";
+import { appUrl } from "@/lib/paths";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  browserMediaUrl,
-  uiApi,
+  apiV1,
   waitForTask,
 } from "@/lib/api-v1-client";
 import type { ApiV1AssetDetail, TaskAccepted } from "@/shared/contracts";
@@ -65,7 +65,7 @@ export function AssetEditor({
     const path = `/assets/${assetId}${query}`;
     const timer = window.setInterval(async () => {
       try {
-        const next = await uiApi<ApiV1AssetDetail>(path);
+        const next = await apiV1<ApiV1AssetDetail>(path);
         setAsset(next);
         if (next.status === "done") {
           setDescription(next.description);
@@ -111,7 +111,7 @@ export function AssetEditor({
 
   const save = () =>
     run(async () => {
-      const task = await uiApi<TaskAccepted>(`/assets/${asset.asset_id}`, {
+      const task = await apiV1<TaskAccepted>(`/assets/${asset.asset_id}`, {
         method: "PATCH",
         body: JSON.stringify({
           user_id: asset.user_id,
@@ -121,7 +121,7 @@ export function AssetEditor({
         }),
       });
       await waitForTask(task);
-      const next = await uiApi<ApiV1AssetDetail>(detailPath(asset));
+      const next = await apiV1<ApiV1AssetDetail>(detailPath(asset));
       setAsset(next);
       setMessage("更改已保存。");
       router.refresh();
@@ -129,7 +129,7 @@ export function AssetEditor({
 
   const publish = () =>
     run(async () => {
-      const updateTask = await uiApi<TaskAccepted>(`/assets/${asset.asset_id}`, {
+      const updateTask = await apiV1<TaskAccepted>(`/assets/${asset.asset_id}`, {
         method: "PATCH",
         body: JSON.stringify({
           user_id: asset.user_id,
@@ -139,7 +139,7 @@ export function AssetEditor({
         }),
       });
       await waitForTask(updateTask);
-      const publishTask = await uiApi<TaskAccepted>(
+      const publishTask = await apiV1<TaskAccepted>(
         `/assets/${asset.asset_id}/publish`,
         {
           method: "POST",
@@ -147,7 +147,7 @@ export function AssetEditor({
         },
       );
       await waitForTask(publishTask);
-      const next = await uiApi<ApiV1AssetDetail>(detailPath(asset));
+      const next = await apiV1<ApiV1AssetDetail>(detailPath(asset));
       setAsset(next);
       setMessage("素材已正式入库。");
       router.refresh();
@@ -155,7 +155,7 @@ export function AssetEditor({
 
   const retry = () =>
     run(async () => {
-      const task = await uiApi<TaskAccepted>(
+      const task = await apiV1<TaskAccepted>(
         `/assets/${asset.asset_id}/retry`,
         {
           method: "POST",
@@ -163,7 +163,7 @@ export function AssetEditor({
         },
       );
       await waitForTask(task);
-      const next = await uiApi<ApiV1AssetDetail>(detailPath(asset));
+      const next = await apiV1<ApiV1AssetDetail>(detailPath(asset));
       setAsset(next);
       setMessage("已重新加入处理队列。");
     });
@@ -174,12 +174,12 @@ export function AssetEditor({
         ? "移出个人素材库并转为公共素材"
         : "永久删除公共素材及其文件";
       if (!window.confirm(`确认${action}？`)) return;
-      const task = await uiApi<TaskAccepted>(`/assets/${asset.asset_id}`, {
+      const task = await apiV1<TaskAccepted>(`/assets/${asset.asset_id}`, {
         method: "DELETE",
         body: JSON.stringify({ user_id: asset.user_id }),
       });
       await waitForTask(task);
-      router.push("/");
+      router.push(appUrl("/"));
       router.refresh();
     });
 
@@ -217,7 +217,7 @@ export function AssetEditor({
           )}
           <Button asChild variant="outline">
             <a
-              href={`${browserMediaUrl(asset.media_url)}${asset.media_url.includes("?") ? "&" : "?"}download=1`}
+              href={`${asset.media_url}${asset.media_url.includes("?") ? "&" : "?"}download=1`}
               download={asset.original_filename}
             >
               <Download className="size-4" /> 下载素材
@@ -245,7 +245,7 @@ export function AssetEditor({
             <div className="aspect-video min-h-72 bg-slate-100">
               <MediaPreview
                 mediaType={asset.media_type}
-                src={browserMediaUrl(asset.media_url)}
+                src={asset.media_url}
                 name={asset.name}
               />
             </div>
