@@ -17,6 +17,7 @@ import { WebUiLink } from "@/components/webui-link";
 import { serverApiV1, serverWebUiApi } from "@/lib/server-api-v1";
 import { appUrl } from "@/lib/paths";
 import { detectSearchInputMode } from "@/server/search/relevance";
+import { userDirectoryResponseSchema } from "@/shared/contracts";
 import type {
   AssetQueryResponse,
   UserDirectoryResponse,
@@ -129,7 +130,9 @@ export default async function OverviewPage({
         include_tag_statistics: true,
       }),
     }),
-    serverWebUiApi<UserDirectoryResponse>("/users"),
+    serverWebUiApi<UserDirectoryResponse>("/users")
+      .then((directory) => userDirectoryResponseSchema.parse(directory))
+      .catch((): UserDirectoryResponse => ({ items: [] })),
   ]);
   const common = { view: effectiveView, tag: tagQuery, layout, userId, scope };
   const uploadHref = userId
