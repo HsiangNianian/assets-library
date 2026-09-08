@@ -190,6 +190,34 @@ describe("MCP tool registry", () => {
     await client.close();
   });
 
+  it("excludes the current uploader from MCP public searches", async () => {
+    const queryAssets = vi.fn(async () => ({
+      items: [],
+      next_cursor: null,
+      has_more: false,
+      tag_statistics: null,
+      search: null,
+    }));
+    const service = { queryAssets } as unknown as ApiV1Service;
+    const client = await connectedClient(testConfig(), service);
+
+    await client.callTool({
+      name: "query_assets",
+      arguments: { scope: "public", keywords: ["AI"] },
+    });
+
+    expect(queryAssets).toHaveBeenCalledWith(
+      expect.objectContaining({
+        keywords: ["AI"],
+        filter: expect.objectContaining({
+          user_scope: { mode: "exclude_user", user_id: "user_mcp_test" },
+        }),
+      }),
+    );
+    expect(queryAssets.mock.calls[0]).toHaveLength(1);
+    await client.close();
+  });
+
   it("returns media and video thumbnail links as origin-independent relative URLs", async () => {
     const assetId = "00000000-0000-4000-8000-000000000001";
     const getAsset = vi.fn(async () => ({
@@ -324,7 +352,6 @@ describe("MCP tool registry", () => {
           { url: "https://cdn.example.com/a.png", filename: "a.png" },
           { url: "https://cdn.example.com/b.mp4", filename: "b.mp4" },
         ],
-        auto_publish: true,
       },
     });
 
@@ -332,7 +359,6 @@ describe("MCP tool registry", () => {
     expect(createUploadTask).toHaveBeenCalledWith({
       user_id: "user_mcp_test",
       callback_url: null,
-      auto_publish: true,
       items: [
         { filename: "a.png", size_bytes: 3, content_type: null },
         { filename: "b.mp4", size_bytes: 3, content_type: null },
