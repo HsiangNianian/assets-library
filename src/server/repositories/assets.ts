@@ -1175,15 +1175,99 @@ async function matchingAssetScores(tagQuery: string) {
   const tagRows = await db
     .select({
       assetId: assetTags.assetId,
+      category: tags.category,
       normalizedValue: tags.normalizedValue,
     })
     .from(assetTags)
-    .innerJoin(tags, eq(assetTags.tagId, tags.id));
+    .innerJoin(tags, eq(assetTags.tagId, tags.id))
+    .innerJoin(assets, eq(assetTags.assetId, assets.id))
+    // 必须先限定用户/状态等基础范围，再判断是否启用 typo 兜底；其他作用域的
+    // exact 命中不能阻止当前作用域中的错别字候选被召回。
+    .where(and(...baseConditions));
+
+    // 素材id -> 标签列表,当前素材收集的标签
+  const tagsByAsset = new Map<string, SearchableTag[]>();
   for (const row of tagRows) {
-    const score = tagMatchScore(row.normalizedValue, tagQuery);
-    if (score > (scores.get(row.assetId) ?? 0)) scores.set(row.assetId, score);
+    const current = tagsByAsset.get(row.assetId) ?? [];
+    current.push({ category: row.category, value: row.normalizedValue });
+    tagsByAsset.set(row.assetId, current);
   }
-  return scores;
+
+  const scoringQuery = keywords.length === 1 ? keywords[0]! : tokens;
+  //根据关键字计算所有候选素材的匹配分数
+  const scoreAll = (allowTypo: boolean) => {
+    // 素材id -> 匹配分数
+    const scores = new Map<string, RankedAssetMatch>();
+    for (const [assetId, assetTagsForSearch] of tagsByAsset) {
+      // 计算当前素材与关键词的相关性。
+      /*
+      完全匹配 exact	1.00
+      业务别名 alias	0.95
+      前缀匹配 prefix	0.85
+      包含匹配 contains	0.72
+      错别字匹配 typo	0.55
+      */
+      const relevance = scoreKeywordRelevance(scoringQuery, assetTagsForSearch, {
+        // 控制是否允许错别字匹配
+        allowTypo,
+      });
+      if (relevance.score > 0) {
+        scores.set(assetId, rankedKeywordMatch(relevance));
+      }
+    }
+    return scores;
+  };
+  // 强关键词匹配
+  const strongScores = scoreAll(false);
+  // 根据阈值筛选
+  const strongMatches = qualifiedMatches(
+    strongScores,
+    DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword,
+  );
+  const queryText = keywords.join(" ");
+  const shared = {
+    // 是不是 ["ai", "aigc", "人工智能", "生成式人工智能", "智能科技"]中的一个
+    broadQuery: isBroadAiQuery(tokens),
+    semanticText: isBroadAiQuery(tokens)
+      ? DEFAULT_BUSINESS_ALIASES[0]?.join(" ")
+      : normalizeSemanticText(queryText),
+  };
+  // 如果有强匹配，直接返回
+  if (strongMatches.size) {
+    return {
+      assetIds: new Set(strongMatches.keys()),
+      scores: strongMatches,
+      threshold: DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword,
+      maxScore: Math.max(...[...strongScores.values()].map((item) => item.finalScore)),
+      reason: "matched",
+      ...shared,
+    };
+  }
+  // 如果没有强匹配，尝试错别字匹配
+  const fallbackScores = scoreAll(true);
+  const typoScores = new Map(
+    [...fallbackScores].filter(([, match]) => match.matchType === "typo"),
+  );
+  // 根据阈值筛选
+  const fallbackMatches = qualifiedMatches(
+    typoScores,
+    DEFAULT_RELEVANCE_THRESHOLDS.typoFallback,
+  );
+  const allFallbackScores = [...typoScores.values()].map(
+    (item) => item.finalScore,
+  );
+  return {
+    assetIds: new Set(fallbackMatches.keys()),
+    scores: fallbackMatches,
+    threshold: DEFAULT_RELEVANCE_THRESHOLDS.typoFallback,
+    maxScore: allFallbackScores.length ? Math.max(...allFallbackScores) : null,
+    reason: fallbackMatches.size
+      ? "matched"
+      : tagRows.length
+        ? "fallback_exhausted"
+        : "no_candidates",
+    ...shared,
+  };
 }
 
 /**
@@ -1206,66 +1290,304 @@ export async function queryAssetsPage({
   ...scope
 }: QueryAssetsOptions = {}): Promise<AssetQueryPage> {
   const safeLimit = Math.min(Math.max(limit, 1), 100);
+  // 分页,第几页
   const requestedPage = Number.isInteger(page) && page > 0 ? page : 1;
-  const conditions: SQL[] = [];
+  // 是否删除
+  const conditions: SQL[] = [isNull(assets.deletedAt)];
+  // 素材归属条件：公开素材/私有素材/排除某用户素材
   const ownership = scopeCondition(scope);
   if (ownership) conditions.push(ownership);
+  // 检索的素材的媒体类型
   if (mediaTypes.length) conditions.push(inArray(assets.mediaType, mediaTypes));
   const processing = processingCondition(processingStatuses);
   if (processing) conditions.push(processing);
+  // 筛选指定状态的素材: published、deleted、pending_review
   if (reviewStatuses.length) {
     conditions.push(inArray(assets.reviewStatus, reviewStatuses));
   }
-
-  const [exactTagIds, keywordMatches] = await Promise.all([
+  // 关键词精确匹配和标签
+  // initialKeywordMatches 初始关键词匹配结果
+  // exactTagIds 选中的素材id
+  const [exactTagIds, initialKeywordMatches] = await Promise.all([
+    // 筛选指定标签的素材
     assetIdsMatchingExactTags(exactTags),
-    assetIdsMatchingKeywords(keywords),
+    //  关键字匹配
+    assetIdsMatchingKeywords(keywords, conditions),
   ]);
+  let keywordMatches = initialKeywordMatches;
   const candidateSets = [exactTagIds, keywordMatches.assetIds].filter(
     (value): value is Set<string> => value !== undefined,
   );
-  const candidateIds = intersectAssetIdSets(candidateSets);
+  //  候选的素材集合
+  let candidateIds = intersectAssetIdSets(candidateSets);
+  // 如果没有候选素材：用户没有勾选素材 and 关键字也没匹配到
   if (candidateIds && candidateIds.size === 0) {
-    return {
-      items: [],
-      page: 1,
-      pageSize: safeLimit,
-      total: 0,
-      totalPages: 1,
-      ...(includeTagStatistics
-        ? { tagStatistics: emptyTagStatistics() }
-        : {}),
-    };
+    const mode = semanticQuery?.trim() ? "semantic" : "keyword";
+    // 语义检索/关键字检索的阈值
+    const threshold = semanticQuery?.trim()
+      ? DEFAULT_RELEVANCE_THRESHOLDS.semantic
+      : (keywordMatches.threshold ??
+        DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword);
+        // 返回空结果
+    return emptyAssetQueryPage(
+      safeLimit,
+      includeTagStatistics,
+      searchMetadata(
+        mode,
+        threshold,
+        keywordMatches.maxScore ?? null,
+        mode === "keyword"
+          ? (keywordMatches.reason ?? "no_candidates")
+          : "no_candidates",
+      ),
+    );
   }
+
+  let keywordSearchMeta = keywordMatches.threshold
+    ? searchMetadata(
+        "keyword",
+        keywordMatches.threshold,
+        keywordMatches.maxScore ?? null,
+        keywordMatches.reason ?? "matched",
+      )
+    : null;
+
+    // 宽泛查询，例如用户输入AI这类词的时候
+  if (
+    !semanticQuery?.trim() &&
+    keywordMatches.broadQuery &&
+    keywordMatches.scores &&
+    candidateIds
+  ) {
+    // 筛选候选素材
+    const broadWhere = and(...conditions, inArray(assets.id, [...candidateIds]));
+    const eligibleRows = await db
+      .select({ id: assets.id })
+      .from(assets)
+      .where(broadWhere)
+      .orderBy(desc(assets.createdAt), desc(assets.id));
+      // 已经通过所有硬性过滤条件的候选素材 ID。
+    const eligibleIds = eligibleRows.map((row) => row.id);
+    if (!eligibleIds.length) {
+      return emptyAssetQueryPage(
+        safeLimit,
+        includeTagStatistics,
+        searchMetadata(
+          "hybrid",
+          DEFAULT_RELEVANCE_THRESHOLDS.hybrid,
+          null,
+          "no_candidates",
+        ),
+      );
+    }
+
+    let semanticScores: Map<string, number> | undefined;
+    if (semanticSearchEnabled()) {
+      try {
+        // 使用这些宽泛词进行语义搜索
+        semanticScores = await searchAnalysis(
+          // DEFAULT_BUSINESS_ALIASES[0]?.join(" ")
+          // ai aigc 人工智能 生成式人工智能 智能科技
+          keywordMatches.semanticText ?? keywords.join(" "),
+          Math.min(800, Math.max(safeLimit * 8, eligibleIds.length * 5)),
+          eligibleIds,
+          { minimumSimilarity: 0 },
+        );
+      } catch (error) {
+        console.error(
+          "Broad keyword semantic rerank unavailable; using lexical fallback.",
+          error,
+        );
+      }
+    }
+    // 素材的语义相似度得分和关键字的匹配得分
+    const broadCandidates = eligibleIds.flatMap((assetId) => {
+      const lexical = keywordMatches.scores?.get(assetId);
+      return lexical
+        ? [{
+            assetId,
+            lexicalScore: lexical.keywordScore ?? lexical.finalScore,
+            semanticScore: semanticScores?.get(assetId),
+          }]
+        : [];
+    });
+    //
+    const tier = selectBroadQueryRecallTier(
+      broadCandidates,
+      DEFAULT_RELEVANCE_THRESHOLDS.semantic,
+      broadCandidates.length,
+    );
+    const lexicalFallbackIds = selectBroadQueryRecallTier(
+      broadCandidates,
+      1,
+      broadCandidates.length,
+    ).assetIds;
+
+    const applyLexicalFallback = () => {
+      const fallbackScores = new Map<string, RankedAssetMatch>();
+      for (const assetId of lexicalFallbackIds) {
+        const lexical = keywordMatches.scores?.get(assetId);
+        if (!lexical) continue;
+        fallbackScores.set(assetId, {
+          ...lexical,
+          ...(semanticScores?.has(assetId)
+            ? { semanticScore: semanticScores.get(assetId) }
+            : {}),
+        });
+      }
+      candidateIds = new Set(fallbackScores.keys());
+      const lexicalScores = [...fallbackScores.values()].map(
+        (match) => match.finalScore,
+      );
+      const maxScore = lexicalScores.length
+        ? Math.max(...lexicalScores)
+        : null;
+      keywordMatches = {
+        ...keywordMatches,
+        assetIds: candidateIds,
+        scores: fallbackScores,
+        threshold: DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword,
+        maxScore,
+        reason: fallbackScores.size ? "matched" : "fallback_exhausted",
+      };
+      keywordSearchMeta = searchMetadata(
+        "keyword",
+        DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword,
+        maxScore,
+        fallbackScores.size ? "matched" : "fallback_exhausted",
+      );
+    };
+
+    if (!tier.useSemanticRerank) {
+      // exact/alias 是强证据：语义缺失或整体偏低时返回全部强命中，
+      // 不能把 AI=1 惩罚成 0.4，也不能再人为截断为前三项。
+      applyLexicalFallback();
+    } else {
+      const hybridScores = new Map<string, RankedAssetMatch>();
+      for (const assetId of tier.assetIds) {
+        const lexical = keywordMatches.scores.get(assetId);
+        const semanticScore = semanticScores?.get(assetId);
+        if (!lexical || semanticScore === undefined) continue;
+        hybridScores.set(assetId, {
+          ...lexical,
+          // 合并语义相似度得分和关键字的匹配得分
+          finalScore: hybridRelevanceScore(
+            lexical.keywordScore,
+            semanticScore,
+          ),
+          semanticScore,
+          matchType: "hybrid",
+        });
+      }
+      const qualified = qualifiedMatches(
+        hybridScores,
+        DEFAULT_RELEVANCE_THRESHOLDS.hybrid,
+      );
+      if (!qualified.size) {
+        applyLexicalFallback();
+      } else {
+        const allHybridScores = [...hybridScores.values()].map(
+          (match) => match.finalScore,
+        );
+        const maxScore = Math.max(...allHybridScores);
+        candidateIds = new Set(qualified.keys());
+        // 合并语义相似度得分和关键字的匹配得分的结果
+        keywordMatches = {
+          ...keywordMatches,
+          assetIds: candidateIds,
+          scores: qualified,
+          threshold: DEFAULT_RELEVANCE_THRESHOLDS.hybrid,
+          maxScore,
+          reason: "matched",
+        };
+        keywordSearchMeta = searchMetadata(
+          "hybrid",
+          DEFAULT_RELEVANCE_THRESHOLDS.hybrid,
+          maxScore,
+          "matched",
+        );
+      }
+    }
+  }
+
   if (candidateIds) conditions.push(inArray(assets.id, [...candidateIds]));
   const where = conditions.length ? and(...conditions) : undefined;
-
+  // 语义召回
   if (semanticQuery?.trim()) {
+    const semanticThreshold = DEFAULT_RELEVANCE_THRESHOLDS.semantic;
+    if (!semanticSearchEnabled()) {
+      return emptyAssetQueryPage(
+        safeLimit,
+        includeTagStatistics,
+        searchMetadata(
+          "semantic",
+          semanticThreshold,
+          null,
+          "semantic_unavailable",
+        ),
+      );
+    }
     const rows = await db
       .select()
       .from(assets)
       .where(where)
       .orderBy(desc(assets.createdAt), desc(assets.id));
     const filteredIds = rows.map((row) => row.id);
+    // 为空
     if (!filteredIds.length) {
-      return {
-        items: [],
-        page: 1,
-        pageSize: safeLimit,
-        total: 0,
-        totalPages: 1,
-        ...(includeTagStatistics
-          ? { tagStatistics: emptyTagStatistics() }
-          : {}),
-      };
+      return emptyAssetQueryPage(
+        safeLimit,
+        includeTagStatistics,
+        searchMetadata(
+          "semantic",
+          semanticThreshold,
+          null,
+          "no_candidates",
+        ),
+      );
     }
-    const semanticScores = await searchAnalysis(
-      semanticQuery.trim(),
-      // 每个素材可能包含多个向量分块，适度过采样后再按 asset_id 去重。
-      Math.max(safeLimit * 8, safeLimit),
-      filteredIds,
+    let semanticScores: Map<string, number>;
+    try {
+      semanticScores = await searchAnalysis(
+        // 对query进行切分
+        normalizeSemanticText(semanticQuery),
+        // 每个素材可能包含多个向量分块，适度过采样后再按 asset_id 去重。
+        Math.max(safeLimit * 8, safeLimit),
+        filteredIds,
+        { minimumSimilarity: 0 },
+      );
+    } catch {
+      return emptyAssetQueryPage(
+        safeLimit,
+        includeTagStatistics,
+        searchMetadata(
+          "semantic",
+          semanticThreshold,
+          null,
+          "semantic_unavailable",
+        ),
+      );
+    }
+    const rawScores = [...semanticScores.values()];
+    const maxScore = rawScores.length ? Math.max(...rawScores) : null;
+    // 筛选分数大于semanticThreshold的素材
+    const qualifiedScores = new Map(
+      [...semanticScores].filter(([, score]) => score > semanticThreshold),
     );
-    const rankedIds = [...semanticScores.entries()]
+    if (!qualifiedScores.size) {
+      return emptyAssetQueryPage(
+        safeLimit,
+        includeTagStatistics,
+        searchMetadata(
+          "semantic",
+          semanticThreshold,
+          maxScore,
+          semanticScores.size ? "below_threshold" : "no_candidates",
+        ),
+      );
+    }
+    // 按分数排序
+    const rankedIds = [...qualifiedScores.entries()]
       .sort(([, leftScore], [, rightScore]) => rightScore - leftScore)
       .slice(0, safeLimit)
       .map(([assetId]) => assetId);
@@ -1274,12 +1596,15 @@ export async function queryAssetsPage({
     const items = rankedIds.flatMap((assetId) => {
       const row = rowsById.get(assetId);
       if (!row) return [];
-      const semanticScore = semanticScores.get(assetId) ?? 0;
+      const semanticScore = qualifiedScores.get(assetId) ?? 0;
       return [
         {
           ...summaryFromRow(row, tagMap.get(assetId) ?? []),
-          searchScore: Math.round(semanticScore * 250),
+          searchScore: semanticScore,
           semanticScore,
+          matchType: "semantic" as const,
+          matchedTerms: [],
+          matchedCategories: [],
         },
       ];
     });
@@ -1292,6 +1617,12 @@ export async function queryAssetsPage({
       ...(includeTagStatistics
         ? { tagStatistics: await tagStatisticsForAssetIds(rankedIds) }
         : {}),
+      search: searchMetadata(
+        "semantic",
+        semanticThreshold,
+        maxScore,
+        "matched",
+      ),
     };
   }
 
@@ -1300,6 +1631,18 @@ export async function queryAssetsPage({
     .from(assets)
     .where(where);
   const total = countRow?.value ?? 0;
+  if (total === 0 && keywordSearchMeta) {
+    return emptyAssetQueryPage(
+      safeLimit,
+      includeTagStatistics,
+      searchMetadata(
+        keywordSearchMeta.mode,
+        keywordSearchMeta.threshold,
+        null,
+        "no_candidates",
+      ),
+    );
+  }
   const totalPages = Math.max(1, Math.ceil(total / safeLimit));
   const statisticsPromise = includeTagStatistics
     ? db
@@ -1321,6 +1664,7 @@ export async function queryAssetsPage({
       ...(statisticsPromise
         ? { tagStatistics: await statisticsPromise }
         : {}),
+      search: keywordSearchMeta,
     };
   }
   const safePage = requestedPage;
@@ -1336,9 +1680,13 @@ export async function queryAssetsPage({
     rows = matchingRows
       .sort((left, right) => {
         const scoreDifference =
-          (keywordMatches.scores?.get(right.id) ?? 0) -
-          (keywordMatches.scores?.get(left.id) ?? 0);
+          (keywordMatches.scores?.get(right.id)?.finalScore ?? 0) -
+          (keywordMatches.scores?.get(left.id)?.finalScore ?? 0);
         if (scoreDifference !== 0) return scoreDifference;
+        const semanticDifference =
+          (keywordMatches.scores?.get(right.id)?.semanticScore ?? -1) -
+          (keywordMatches.scores?.get(left.id)?.semanticScore ?? -1);
+        if (semanticDifference !== 0) return semanticDifference;
         const createdDifference =
           right.createdAt.getTime() - left.createdAt.getTime();
         if (createdDifference !== 0) return createdDifference;
@@ -1356,12 +1704,22 @@ export async function queryAssetsPage({
   }
   const tagMap = await getTagsForAssets(rows.map((row) => row.id));
   return {
-    items: rows.map((row) => ({
-      ...summaryFromRow(row, tagMap.get(row.id) ?? []),
-      ...(keywordMatches.scores?.has(row.id)
-        ? { searchScore: keywordMatches.scores.get(row.id) }
-        : {}),
-    })),
+    items: rows.map((row) => {
+      const match = keywordMatches.scores?.get(row.id);
+      return {
+        ...summaryFromRow(row, tagMap.get(row.id) ?? []),
+        ...(match
+          ? {
+              searchScore: match.finalScore,
+              keywordScore: match.keywordScore,
+              semanticScore: match.semanticScore,
+              matchType: match.matchType,
+              matchedTerms: match.matchedTerms,
+              matchedCategories: match.matchedCategories,
+            }
+          : {}),
+      };
+    }),
     page: safePage,
     pageSize: safeLimit,
     total,
@@ -1369,6 +1727,7 @@ export async function queryAssetsPage({
     ...(statisticsPromise
       ? { tagStatistics: await statisticsPromise }
       : {}),
+    search: keywordSearchMeta,
   };
 }
 
@@ -1380,102 +1739,46 @@ export async function listAssets({
   tagQuery,
   ...scope
 }: ListAssetsOptions = {}): Promise<AssetPage> {
-  const safeLimit = Math.min(Math.max(limit, 1), 50);
-  const requestedPage = Number.isInteger(page) && page > 0 ? page : 1;
-  const normalizedTagQuery =
-    view === "published"
-      ? tagQuery?.trim().toLocaleLowerCase().slice(0, 128)
-      : undefined;
-  const conditions: SQL[] = [
-    eq(
-      assets.reviewStatus,
+  const result = await queryAssetsPage({
+    page,
+    limit: Math.min(Math.max(limit, 1), 50),
+    reviewStatuses: [
       view === "published" ? "published" : "pending_review",
-    ),
-  ];
-  const ownership = scopeCondition(scope);
-  if (ownership) conditions.push(ownership);
-
-  const scores = normalizedTagQuery
-    ? await matchingAssetScores(normalizedTagQuery)
-    : undefined;
-  const exactTagMatchOnly = normalizedTagQuery
-    ? requiresExactTagMatch(normalizedTagQuery)
-    : false;
-  const semanticScores = new Map<string, number>();
-  if (normalizedTagQuery) {
-    try {
-      const foundSemanticScores = await searchAnalysis(
-        normalizedTagQuery,
-        safeLimit * 5,
-      );
-      for (const [assetId, score] of foundSemanticScores) {
-        if (exactTagMatchOnly && !scores?.has(assetId)) continue;
-        if (score <= strongSemanticSimilarity && !scores?.has(assetId)) continue;
-        semanticScores.set(assetId, score);
-        scores?.set(assetId, Math.max(scores.get(assetId) ?? 0, score * 250));
-      }
-    } catch (error) {
-      console.error("Semantic search unavailable; falling back to tag matching.", error);
-    }
-    if (!scores?.size) {
-      return {
-        items: [],
-        page: 1,
-        pageSize: safeLimit,
-        total: 0,
-        totalPages: 1,
-      };
-    }
-    conditions.push(inArray(assets.id, [...scores.keys()]));
-  }
-
-  const [countRow] = await db
-    .select({ value: sql<number>`count(*)`.mapWith(Number) })
-    .from(assets)
-    .where(and(...conditions));
-  const total = countRow?.value ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / safeLimit));
-  const safePage = Math.min(requestedPage, totalPages);
-  const matchingRows = await db
-    .select()
-    .from(assets)
-    .where(and(...conditions))
-    .orderBy(desc(assets.createdAt));
-  const rows = scores
-    ? matchingRows
-        .sort(
-          (left, right) =>
-            (scores.get(right.id) ?? 0) - (scores.get(left.id) ?? 0),
-        )
-        .slice((safePage - 1) * safeLimit, safePage * safeLimit)
-    : matchingRows.slice(
-        (safePage - 1) * safeLimit,
-        safePage * safeLimit,
-      );
-  const tagMap = await getTagsForAssets(rows.map((row) => row.id));
+    ],
+    keywords:
+      view === "published" && tagQuery?.trim()
+        ? [tagQuery.trim().slice(0, 128)]
+        : [],
+    includeTagStatistics: false,
+    ...scope,
+  });
   return {
-    items: rows.map((row) => ({
-      ...summaryFromRow(row, tagMap.get(row.id) ?? []),
-      ...(scores?.has(row.id) ? { searchScore: scores.get(row.id) } : {}),
-      ...(semanticScores.has(row.id)
-        ? { semanticScore: semanticScores.get(row.id) }
-        : {}),
-    })),
-    page: safePage,
-    pageSize: safeLimit,
-    total,
-    totalPages,
+    items: result.items,
+    page: result.page,
+    pageSize: result.pageSize,
+    total: result.total,
+    totalPages: result.totalPages,
   };
 }
 
-async function publishedAssetIdsMatchingKeywords(
+async function searchableAssetIdsMatchingKeywords(
   keywords: string[],
   scope: AssetScope,
+  candidateAssetIds?: readonly string[],
 ) {
+  const constrainedIds = candidateAssetIds === undefined
+    ? undefined
+    : [...new Set(candidateAssetIds)];
+  if (constrainedIds?.length === 0) return [];
   const ownership = scopeCondition(scope);
+  // keywords=[] 时，返回所有勾选的待审核或已发布素材
   if (!keywords.length) {
-    const conditions: SQL[] = [eq(assets.reviewStatus, "published")];
+    const conditions: SQL[] = [
+      inArray(assets.reviewStatus, ["pending_review", "published"]),
+      isNull(assets.deletedAt),
+    ];
     if (ownership) conditions.push(ownership);
+    if (constrainedIds) conditions.push(inArray(assets.id, constrainedIds));
     return (
       await db
         .select({ id: assets.id })
@@ -1483,20 +1786,17 @@ async function publishedAssetIdsMatchingKeywords(
         .where(and(...conditions))
     ).map((row) => row.id);
   }
-  const matchesByKeyword = await Promise.all(
-    keywords.map((keyword) => matchingAssetScores(keyword)),
-  );
-  const firstMatches = matchesByKeyword[0];
-  if (!firstMatches?.size) return [];
-  const matchedAssetIds = [...firstMatches.keys()].filter((assetId) =>
-    matchesByKeyword.every((matches) => matches.has(assetId)),
-  );
+  // 关键词匹配的结果
+  const keywordMatches = await assetIdsMatchingKeywords(keywords);
+  const matchedAssetIds = [...(keywordMatches.assetIds ?? [])];
   if (!matchedAssetIds.length) return [];
   const conditions: SQL[] = [
-    eq(assets.reviewStatus, "published"),
+    inArray(assets.reviewStatus, ["pending_review", "published"]),
+    isNull(assets.deletedAt),
     inArray(assets.id, matchedAssetIds),
   ];
   if (ownership) conditions.push(ownership);
+  if (constrainedIds) conditions.push(inArray(assets.id, constrainedIds));
   return (
     await db
       .select({ id: assets.id })
@@ -1505,50 +1805,141 @@ async function publishedAssetIdsMatchingKeywords(
   ).map((row) => row.id);
 }
 
-export async function searchAssetsByDescription(
+export interface DescriptionSearchResult {
+  items: AssetSummary[];
+  threshold: number;
+  maxScore: number | null;
+  reason: AssetSearchMeta["reason"];
+  message: string | null;
+}
+
+export interface DescriptionSearchOptions {
+  /** When present, semantic recall is restricted to this explicit asset set. */
+  candidateAssetIds?: readonly string[];
+  /** Exclude already used assets before vector recall. */
+  excludedAssetIds?: readonly string[];
+  /** Override the default semantic threshold for compatibility callers. */
+  semanticThreshold?: number;
+  /** Randomize qualified recall before applying input.limit. */
+  isRandom?: boolean;
+}
+
+function sampleAssetIds(
+  assetIds: readonly string[],
+  limit: number,
+) {
+  const remaining = [...assetIds];
+  const sampled: string[] = [];
+  while (sampled.length < limit && remaining.length > 0) {
+    const index = crypto.randomInt(remaining.length);
+    sampled.push(...remaining.splice(index, 1));
+  }
+  return sampled;
+}
+
+export async function searchAssetsByDescriptionDetailed(
   { description, keywords = [], limit }: DescriptionSearch,
   scope: AssetScope = {},
-) {
+  options: DescriptionSearchOptions = {},
+): Promise<DescriptionSearchResult> {
+  // 语义搜索
+  const threshold =
+    options.semanticThreshold ?? DEFAULT_RELEVANCE_THRESHOLDS.semantic;
+  const result = (
+    items: AssetSummary[],
+    maxScore: number | null,
+    reason: AssetSearchMeta["reason"],
+  ): DescriptionSearchResult => {
+    const metadata = searchMetadata("semantic", threshold, maxScore, reason);
+    return {
+      items,
+      threshold,
+      maxScore,
+      reason,
+      message: metadata.message,
+    };
+  };
+
   const normalizedKeywords = [
-    ...new Set(keywords.map((keyword) => keyword.toLocaleLowerCase())),
+    ...new Set(keywords.map(normalizeSearchText).filter(Boolean)),
   ];
-  const candidateIds = await publishedAssetIdsMatchingKeywords(
+  // 根据scope和candidateAssetIds过滤出候选素材id
+  const excludedIds = new Set(options.excludedAssetIds);
+  const candidateIds = (await searchableAssetIdsMatchingKeywords(
     normalizedKeywords,
     scope,
+    options.candidateAssetIds,
+  )).filter((id) => !excludedIds.has(id));
+  if (!candidateIds.length) return result([], null, "no_candidates");
+  if (!semanticSearchEnabled()) {
+    return result([], null, "semantic_unavailable");
+  }
+  let scores: Map<string, number>;
+  try {
+    // 根据语义搜索
+    scores = await searchAnalysis(
+      normalizeSemanticText(description),
+      Math.max(limit * 5, limit),
+      candidateIds,
+      { minimumSimilarity: 0 },
+    );
+  } catch {
+    return result([], null, "semantic_unavailable");
+  }
+  const rawScores = [...scores.values()];
+  const maxScore = rawScores.length ? Math.max(...rawScores) : null;
+  // 筛选大于阈值的素材
+  const qualifiedScores = new Map(
+    [...scores].filter(([, score]) => score > threshold),
   );
-  if (!candidateIds.length) return [];
-  const scores = await searchAnalysis(
-    description,
-    Math.max(limit * 5, limit),
-    candidateIds,
-  );
-  const rankedIds = [...scores.entries()]
+  const allRankedIds = [...qualifiedScores.entries()]
     .sort(([, leftScore], [, rightScore]) => rightScore - leftScore)
-    .slice(0, limit)
     .map(([assetId]) => assetId);
-  if (!rankedIds.length) return [];
+  const rankedIds = options.isRandom
+    ? sampleAssetIds(allRankedIds, limit)
+    : allRankedIds.slice(0, limit);
+  if (!rankedIds.length) {
+    return result(
+      [],
+      maxScore,
+      scores.size ? "below_threshold" : "no_candidates",
+    );
+  }
   const rows = await db
     .select()
     .from(assets)
     .where(
       and(
-        eq(assets.reviewStatus, "published"),
+        inArray(assets.reviewStatus, ["pending_review", "published"]),
+        isNull(assets.deletedAt),
         inArray(assets.id, rankedIds),
       ),
     );
   const rowsById = new Map(rows.map((row) => [row.id, row]));
   const tagMap = await getTagsForAssets(rankedIds);
-  return rankedIds.flatMap((assetId) => {
+  const items = rankedIds.flatMap((assetId) => {
     const row = rowsById.get(assetId);
     if (!row) return [];
+    const semanticScore = qualifiedScores.get(assetId) ?? 0;
     return [
       {
         ...summaryFromRow(row, tagMap.get(assetId) ?? []),
-        searchScore: Math.round((scores.get(assetId) ?? 0) * 250),
-        semanticScore: scores.get(assetId),
+        searchScore: semanticScore,
+        semanticScore,
+        matchType: "semantic" as const,
+        matchedTerms: [],
+        matchedCategories: [],
       },
     ];
   });
+  return result(items, maxScore, "matched");
+}
+
+export async function searchAssetsByDescription(
+  input: DescriptionSearch,
+  scope: AssetScope = {},
+) {
+  return (await searchAssetsByDescriptionDetailed(input, scope)).items;
 }
 
 /** 获取素材详情；默认只能读取公共素材，内部调用可显式 includeAllUsers。 */
@@ -1559,6 +1950,7 @@ export async function getAssetDetail(
   const conditions: SQL[] = [
     eq(assets.id, assetId),
     ne(assets.reviewStatus, "deleted"),
+    isNull(assets.deletedAt),
   ];
   const ownership = scopeCondition(scope);
   if (ownership) conditions.push(ownership);
@@ -1578,7 +1970,6 @@ export async function getAssetDetail(
     originalFilename: row.originalFilename,
     mimeType: row.mimeType,
     sizeBytes: row.sizeBytes,
-    directPublish: row.directPublish,
     failureCode: row.failureCode as FailureCode | null,
     failureMessage: row.failureMessage,
     analysis: analysis ? analysisResultSchema.parse(analysis.resultJson) : null,
@@ -1594,6 +1985,62 @@ export async function getAssetRecord(assetId: string) {
   return row;
 }
 
+type AssetTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+async function resolveAssetRef(assetId: string, scope: AssetScope): Promise<AssetRef> {
+  if (scope.userId?.trim()) return { kind: "private", id: assetId };
+  if (!scope.includeAllUsers) return { kind: "public", id: assetId };
+  const [row] = await db
+    .select({ kind: assets.kind })
+    .from(assets)
+    .where(eq(assets.id, assetId))
+    .limit(1);
+  return { kind: row?.kind ?? "public", id: assetId };
+}
+
+async function lockedAsset(tx: AssetTransaction, ref: AssetRef) {
+  if (ref.kind === "private") {
+    const [row] = await tx
+      .select()
+      .from(privateAssets)
+      .where(eq(privateAssets.id, ref.id))
+      .for("update")
+      .limit(1);
+    return row
+      ? { ...row, kind: "private" as const, uploaderUserId: null }
+      : undefined;
+  }
+  const [row] = await tx
+    .select()
+    .from(publicAssets)
+    .where(eq(publicAssets.id, ref.id))
+    .for("update")
+    .limit(1);
+  return row
+    ? { ...row, kind: "public" as const, userId: null, publicAssetId: null }
+    : undefined;
+}
+
+function updateAssetRow(
+  tx: AssetTransaction,
+  ref: AssetRef,
+  values: Partial<{
+    name: string;
+    description: string;
+    processingStatus: ProcessingStatus;
+    reviewStatus: ReviewStatus;
+    failureCode: string | null;
+    failureMessage: string | null;
+    deletedAt: Date | null;
+    updatedAt: Date;
+  }>,
+) {
+  if (ref.kind === "private") {
+    return tx.update(privateAssets).set(values).where(eq(privateAssets.id, ref.id));
+  }
+  return tx.update(publicAssets).set(values).where(eq(publicAssets.id, ref.id));
+}
+
 function normalizeTag(value: string) {
   return value.trim().toLocaleLowerCase();
 }
@@ -1604,18 +2051,15 @@ export async function updateAssetMetadata(
   scope: AssetScope = {},
 ) {
   const now = new Date();
+  const ref = await resolveAssetRef(assetId, scope);
   await db.transaction(async (tx) => {
     // 所有权与 deleted 状态必须在行锁内判断，避免检查后被删除/转公共。
-    const [asset] = await tx
-      .select()
-      .from(assets)
-      .where(eq(assets.id, assetId))
-      .for("update")
-      .limit(1);
+    const asset = await lockedAsset(tx, ref);
     if (
       !asset ||
+      asset.deletedAt !== null ||
       asset.reviewStatus === "deleted" ||
-      !rowMatchesScope(asset.userId, scope)
+      !rowMatchesScope(asset, scope)
     ) {
       throw new AppError("invalid_request", "素材不存在。", 404);
     }
@@ -1636,21 +2080,29 @@ export async function updateAssetMetadata(
         tag.source === "model" &&
         !requested.has(`${tag.category}:${normalizeTag(tag.value)}`),
     );
-    await tx
-      .update(assets)
-      .set({ name: edit.name, description: edit.description, updatedAt: now })
-      .where(eq(assets.id, assetId));
+    await updateAssetRow(tx, ref, {
+      name: edit.name,
+      description: edit.description,
+      updatedAt: now,
+    });
     for (const tag of removedModelTags) {
       await tx
-        .insert(assetTagRejections)
+        .insert(assetTagRejectionRecords)
         .ignore()
         .values({
-          assetId,
+          id: crypto.randomUUID(),
+          ...associationTarget(ref),
           category: tag.category,
           normalizedValue: normalizeTag(tag.value),
         });
     }
-    await tx.delete(assetTags).where(eq(assetTags.assetId, assetId));
+    await tx
+      .delete(assetTagRecords)
+      .where(
+        ref.kind === "private"
+          ? eq(assetTagRecords.privateAssetId, assetId)
+          : eq(assetTagRecords.publicAssetId, assetId),
+      );
     for (const tag of edit.tags) {
       const normalizedValue = normalizeTag(tag.value);
       await tx
@@ -1675,10 +2127,11 @@ export async function updateAssetMetadata(
         .limit(1);
       if (!storedTag) throw new Error("标签创建后无法读取。");
       await tx
-        .insert(assetTags)
+        .insert(assetTagRecords)
         .ignore()
         .values({
-          assetId,
+          id: crypto.randomUUID(),
+          ...associationTarget(ref),
           tagId: storedTag.id,
           source: "human",
           confidence: null,
@@ -1689,63 +2142,53 @@ export async function updateAssetMetadata(
 }
 
 export async function publishAsset(assetId: string, scope: AssetScope = {}) {
+  const ref = await resolveAssetRef(assetId, scope);
   await db.transaction(async (tx) => {
-    const [asset] = await tx
-      .select()
-      .from(assets)
-      .where(eq(assets.id, assetId))
-      .for("update")
-      .limit(1);
+    const asset = await lockedAsset(tx, ref);
     if (
       !asset ||
       asset.reviewStatus === "deleted" ||
-      !rowMatchesScope(asset.userId, scope)
+      !rowMatchesScope(asset, scope)
     ) {
       throw new AppError("invalid_request", "素材不存在。", 404);
     }
     if (asset.processingStatus !== "completed") {
       throw new AppError("invalid_request", "素材分析完成后才能入库。", 409);
     }
-    await tx
-      .update(assets)
-      .set({ reviewStatus: "published", updatedAt: new Date() })
-      .where(eq(assets.id, assetId));
+    await updateAssetRow(tx, ref, {
+      reviewStatus: "published",
+      updatedAt: new Date(),
+    });
   });
   return getAssetDetail(assetId, { includeAllUsers: true });
 }
 
 export async function retryAsset(assetId: string, scope: AssetScope = {}) {
   const now = new Date();
+  const ref = await resolveAssetRef(assetId, scope);
   await db.transaction(async (tx) => {
-    const [asset] = await tx
-      .select()
-      .from(assets)
-      .where(eq(assets.id, assetId))
-      .for("update")
-      .limit(1);
+    const asset = await lockedAsset(tx, ref);
     if (
       !asset ||
+      asset.deletedAt !== null ||
       asset.reviewStatus === "deleted" ||
-      !rowMatchesScope(asset.userId, scope)
+      !rowMatchesScope(asset, scope)
     ) {
       throw new AppError("invalid_request", "素材不存在。", 404);
     }
     if (asset.processingStatus !== "failed") {
       throw new AppError("invalid_request", "只有失败的素材可以重试。", 409);
     }
-    await tx
-      .update(assets)
-      .set({
-        processingStatus: "queued",
-        failureCode: null,
-        failureMessage: null,
-        updatedAt: now,
-      })
-      .where(eq(assets.id, assetId));
+    await updateAssetRow(tx, ref, {
+      processingStatus: "queued",
+      failureCode: null,
+      failureMessage: null,
+      updatedAt: now,
+    });
     await tx.insert(jobs).values({
       id: crypto.randomUUID(),
       taskId: asset.taskId,
-      assetId,
+      ...jobTarget(ref),
       type: "analyze",
       availableAt: now,
       createdAt: now,
@@ -1755,42 +2198,17 @@ export async function retryAsset(assetId: string, scope: AssetScope = {}) {
   return getAssetDetail(assetId, { includeAllUsers: true });
 }
 
-/** 个人删除仅清空 user_id，使素材转为公共素材，不删除数据库或物理文件。 */
-export async function releaseAssetToPublic(assetId: string, userId: string) {
-  const result = await db
-    .update(assets)
-    .set({ userId: null, updatedAt: new Date() })
-    .where(
-      and(
-        eq(assets.id, assetId),
-        eq(assets.userId, userId),
-        ne(assets.reviewStatus, "deleted"),
-      ),
-    );
-  if (affectedRows(result) !== 1) {
-    const [current] = await db
-      .select({ userId: assets.userId, reviewStatus: assets.reviewStatus })
-      .from(assets)
-      .where(eq(assets.id, assetId))
-      .limit(1);
-    // worker 在数据库提交后崩溃时可能重放同一作业；已转公共视为幂等成功。
-    if (current?.userId === null && current.reviewStatus !== "deleted") return;
-    throw new AppError("invalid_request", "素材不存在或不属于该用户。", 404);
-  }
-}
-
 /** 公共素材删除先进入异步 delete 作业，worker 完成外部清理后再回收记录。 */
 export async function queuePublicAssetDeletion(assetId: string, taskId: string) {
   const now = new Date();
   await db.transaction(async (tx) => {
     const result = await tx
-      .update(assets)
+      .update(publicAssets)
       .set({ reviewStatus: "deleted", deletedAt: now, updatedAt: now })
       .where(
         and(
-          eq(assets.id, assetId),
-          isNull(assets.userId),
-          ne(assets.reviewStatus, "deleted"),
+          eq(publicAssets.id, assetId),
+          ne(publicAssets.reviewStatus, "deleted"),
         ),
       );
     if (affectedRows(result) !== 1) {
@@ -1799,7 +2217,7 @@ export async function queuePublicAssetDeletion(assetId: string, taskId: string) 
     await tx.insert(jobs).values({
       id: crypto.randomUUID(),
       taskId,
-      assetId,
+      publicAssetId: assetId,
       type: "delete",
       availableAt: now,
       createdAt: now,
@@ -1812,6 +2230,7 @@ export interface ClaimedJob {
   id: string;
   taskId: string | null;
   assetId: string | null;
+  assetKind?: AssetKind | null;
   type: typeof jobs.$inferSelect.type;
   attempt: number;
   payload: Record<string, unknown> | null;
@@ -1833,6 +2252,7 @@ const nonAnalysisClaimableTypes = [
   "delete",
   "cleanup",
   "callback",
+  "match",
   "publish",
   "update",
   "retry",
@@ -1859,7 +2279,12 @@ async function claimQueuedJob(
   return {
     id: row.id,
     taskId: row.taskId,
-    assetId: row.assetId,
+    assetId: row.privateAssetId ?? row.publicAssetId,
+    assetKind: row.privateAssetId
+      ? "private"
+      : row.publicAssetId
+        ? "public"
+        : null,
     type: row.type,
     attempt,
     payload: row.payload,
@@ -2186,7 +2611,7 @@ export async function recoverStaleJobs(staleAfterMs = 2 * 60_000) {
 /**
  * 删除已到期且处于终态的任务明细。
  *
- * assets/video_sources 的追溯外键会自动置空；正在排队或运行的任务即使超过
+ * 公私素材/video_sources 的追溯外键会自动置空；正在排队或运行的任务即使超过
  * expires_at 也不会被清理，避免长视频处理过程中丢失状态。
  */
 export async function deleteExpiredTasks(now = new Date()) {
