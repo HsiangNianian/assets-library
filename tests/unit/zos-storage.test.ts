@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
@@ -22,6 +23,7 @@ function streamFor(bytes: Uint8Array) {
 
 type FakeS3Command =
   | PutObjectCommand
+  | CopyObjectCommand
   | HeadObjectCommand
   | GetObjectCommand
   | DeleteObjectCommand;
@@ -44,9 +46,21 @@ function fakeS3() {
       });
       return { ETag: '"put-etag"' };
     }
+    if (command instanceof CopyObjectCommand) {
+      const sourceKey = decodeURIComponent(command.input.CopySource!).replace(
+        /^archives\//,
+        "",
+      );
+      const object = objects.get(sourceKey);
+      if (!object) throw new Error("not found");
+      objects.set(command.input.Key!, { ...object, bytes: object.bytes.slice() });
+      return { CopyObjectResult: { ETag: object.etag } };
+    }
     if (command instanceof HeadObjectCommand) {
       const object = objects.get(command.input.Key!);
-      if (!object) throw new Error("not found");
+      if (!object) throw Object.assign(new Error("not found"), {
+        name: "NotFound", $metadata: { httpStatusCode: 404 },
+      });
       return {
         ContentLength: object.bytes.byteLength,
         ContentType: object.contentType,
@@ -152,6 +166,102 @@ describe("ZOS object storage adapter", () => {
     });
     expect([...await fs.readFile(destination)]).toEqual([1, 2, 3, 4]);
     await expect(fs.stat(`${destination}.download`)).rejects.toThrow();
+  });
+
+  it("copies an object inside ZOS and verifies the target size", async () => {
+    const fake = fakeS3();
+    fake.objects.set("assets/private/image.png", {
+      bytes: new Uint8Array([1, 2, 3]),
+      contentType: "image/png",
+      etag: '"copy-etag"',
+    });
+    const storage = new ZosObjectStorage({
+      endpoint: "https://zos.example.test",
+      bucket: "archives",
+      accessKeyId: "test-access-key",
+      secretAccessKey: "test-secret-key",
+      client: fake.client,
+      publicBaseUrl: "https://cdn.example.test",
+    });
+
+    await expect(
+      storage.copyObject({
+        sourceKey: "assets/private/image.png",
+        destinationKey: "assets/public/image.png",
+      }),
+    ).resolves.toEqual({
+      key: "assets/public/image.png",
+      sizeBytes: 3,
+      etag: "copy-etag",
+      url: "https://cdn.example.test/assets/public/image.png",
+    });
+    expect(fake.objects.get("assets/public/image.png")?.bytes).toEqual(
+      new Uint8Array([1, 2, 3]),
+    );
+  });
+
+  it.each(["lost-response", "head-failure", "size-mismatch"])(
+    "compensates a newly copied object after %s",
+    async (failure) => {
+      const fake = fakeS3();
+      fake.objects.set("source", { bytes: new Uint8Array([1, 2, 3]), etag: '"source"' });
+      const originalSend = fake.send.getMockImplementation()!;
+      fake.send.mockImplementation(async (command) => {
+        const response = await originalSend(command);
+        if (command instanceof CopyObjectCommand && failure === "lost-response") {
+          throw new Error("copy response lost");
+        }
+        if (command instanceof HeadObjectCommand && command.input.Key === "destination") {
+          if (failure === "head-failure") throw new Error("verification failed");
+          if (failure === "size-mismatch") return { ...response, ContentLength: 99 };
+        }
+        return response;
+      });
+      const storage = new ZosObjectStorage({
+        endpoint: "https://zos.example.test", bucket: "archives",
+        accessKeyId: "test-access-key", secretAccessKey: "test-secret-key", client: fake.client,
+      });
+      await expect(storage.copyObject({ sourceKey: "source", destinationKey: "destination" })).rejects.toThrow();
+      expect(fake.objects.has("destination")).toBe(false);
+      expect(fake.objects.has("source")).toBe(true);
+      expect(fake.send.mock.calls.some(([command]) => command instanceof DeleteObjectCommand)).toBe(true);
+    },
+  );
+
+  it("preserves a pre-existing destination when a copy request fails", async () => {
+    const fake = fakeS3();
+    fake.objects.set("source", { bytes: new Uint8Array([1, 2]), etag: '"source"' });
+    fake.objects.set("destination", { bytes: new Uint8Array([9]), etag: '"original"' });
+    const originalSend = fake.send.getMockImplementation()!;
+    fake.send.mockImplementation(async (command) => {
+      if (command instanceof CopyObjectCommand) throw new Error("copy failed");
+      return originalSend(command);
+    });
+    const storage = new ZosObjectStorage({
+      endpoint: "https://zos.example.test", bucket: "archives",
+      accessKeyId: "test-access-key", secretAccessKey: "test-secret-key", client: fake.client,
+    });
+    await expect(storage.copyObject({ sourceKey: "source", destinationKey: "destination" })).rejects.toThrow("copy failed");
+    expect(fake.objects.get("destination")?.bytes).toEqual(new Uint8Array([9]));
+    expect(fake.send.mock.calls.some(([command]) => command instanceof DeleteObjectCommand)).toBe(false);
+  });
+
+  it("does not copy or delete when destination existence cannot be checked", async () => {
+    const fake = fakeS3();
+    fake.objects.set("source", { bytes: new Uint8Array([1, 2]), etag: '"source"' });
+    const originalSend = fake.send.getMockImplementation()!;
+    fake.send.mockImplementation(async (command) => {
+      if (command instanceof HeadObjectCommand && command.input.Key === "destination") {
+        throw Object.assign(new Error("access denied"), { $metadata: { httpStatusCode: 403 } });
+      }
+      return originalSend(command);
+    });
+    const storage = new ZosObjectStorage({
+      endpoint: "https://zos.example.test", bucket: "archives",
+      accessKeyId: "test-access-key", secretAccessKey: "test-secret-key", client: fake.client,
+    });
+    await expect(storage.copyObject({ sourceKey: "source", destinationKey: "destination" })).rejects.toThrow("access denied");
+    expect(fake.send.mock.calls.some(([command]) => command instanceof CopyObjectCommand || command instanceof DeleteObjectCommand)).toBe(false);
   });
 
   it("deletes a possibly-created object when post-upload verification fails", async () => {
