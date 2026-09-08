@@ -99,6 +99,24 @@ describe("overview search routing", () => {
     expect(text.replace(/\s+/g, "")).toContain("最高相关度61%");
   });
 
+  it.each(["request failure", "invalid response"])(
+    "renders asset results despite a user-directory %s",
+    async (failure) => {
+      apiMocks.serverApiV1.mockResolvedValue(emptyPage({
+        mode: "keyword", threshold: 0.6, max_score: 0.4,
+        reason: "below_threshold", message: "Asset results remain available.",
+      }));
+      if (failure === "request failure") {
+        apiMocks.serverWebUiApi.mockRejectedValue(new Error("directory unavailable"));
+      } else {
+        apiMocks.serverWebUiApi.mockResolvedValue({ items: [{ unexpected: true }] });
+      }
+      const view = await OverviewPage({ searchParams: Promise.resolve({ tag: "AI" }) });
+      expect(renderedText(view)).toContain("Asset results remain available.");
+      expect(requestedBody()).toMatchObject({ keywords: ["AI"] });
+    },
+  );
+
   it("shows the pending review view for a private library", async () => {
     apiMocks.serverApiV1.mockResolvedValue(emptyPage());
     apiMocks.serverWebUiApi.mockResolvedValue({ items: [] });
