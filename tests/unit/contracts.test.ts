@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  apiV1AssetSummarySchema,
   assetEditSchema,
+  assetQueryResponseSchema,
   descriptionSearchSchema,
   imageAnalysisSchema,
   mediaTypeSchema,
+  userDirectoryResponseSchema,
   userMediaListResponseSchema,
   userStorageUsageResponseSchema,
   videoAnalysisSchema,
@@ -66,6 +69,71 @@ describe("shared contracts", () => {
     expect(() => descriptionSearchSchema.parse({ description: "x", limit: 21 })).toThrow();
   });
 
+  it("validates normalized search scores and search metadata", () => {
+    const asset = {
+      asset_id: "00000000-0000-4000-8000-000000000001",
+      parent_video_id: null,
+      segment_index: null,
+      user_id: null,
+      name: "AI 发布会",
+      description: "人工智能产品发布会现场",
+      media_type: "image",
+      status: "done",
+      review_status: "published",
+      tags: [{ category: "style", value: "科技感" }],
+      media_url: "/api/v1/media/00000000-0000-4000-8000-000000000001",
+      created_at: "2026-08-12T12:00:00+08:00",
+      updated_at: "2026-08-12T12:00:00+08:00",
+      search_score: 0.86,
+      keyword_score: 1,
+      semantic_score: 0.767,
+      match_type: "hybrid",
+      matched_terms: ["ai"],
+      matched_categories: ["style"],
+    };
+    expect(
+      assetQueryResponseSchema.parse({
+        items: [asset],
+        next_cursor: null,
+        has_more: false,
+        tag_statistics: null,
+        search: {
+          mode: "hybrid",
+          threshold: 0.65,
+          max_score: 0.86,
+          reason: "matched",
+          message: null,
+        },
+      }),
+    ).toBeTruthy();
+    expect(() =>
+      apiV1AssetSummarySchema.parse({ ...asset, search_score: 1.01 }),
+    ).toThrow();
+  });
+
+  it("requires a message-bearing search outcome for filtered empty results", () => {
+    const emptyResult = {
+      items: [],
+      next_cursor: null,
+      has_more: false,
+      tag_statistics: null,
+      search: {
+        mode: "semantic",
+        threshold: 0.55,
+        max_score: 0.49,
+        reason: "below_threshold",
+        message: "最高匹配分低于展示阈值。",
+      },
+    };
+    expect(assetQueryResponseSchema.parse(emptyResult)).toEqual(emptyResult);
+    expect(() =>
+      assetQueryResponseSchema.parse({
+        ...emptyResult,
+        search: { ...emptyResult.search, message: undefined },
+      }),
+    ).toThrow();
+  });
+
   it("validates user storage totals and discriminated media links", () => {
     expect(
       userStorageUsageResponseSchema.parse({
@@ -105,5 +173,28 @@ describe("shared contracts", () => {
         has_more: false,
       }),
     ).toThrow(/thumbnail/);
+  });
+
+  it("validates the WebUI user directory", () => {
+    expect(
+      userDirectoryResponseSchema.parse({
+        items: [
+          {
+            user_id: "user-7",
+            display_name: "剪辑用户",
+            email: "editor@example.com",
+            department: "内容中心",
+            first_seen_at: "2026-08-12T12:00:00+08:00",
+            last_seen_at: "2026-08-13T12:00:00+08:00",
+            asset_count: 3,
+          },
+        ],
+      }),
+    ).toBeTruthy();
+    expect(() =>
+      userDirectoryResponseSchema.parse({
+        items: [{ user_id: "", asset_count: -1 }],
+      }),
+    ).toThrow();
   });
 });
