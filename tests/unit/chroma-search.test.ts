@@ -86,7 +86,16 @@ describe("Chroma analysis index", () => {
       "/collections/collection-id/query",
     );
     expect(JSON.parse(String(fetchMock.mock.calls.at(-1)?.[1]?.body))).toMatchObject({
+      n_results: 10,
       where: { assetId: { $in: ["asset-1", "asset-2"] } },
     });
+
+    const unfilteredScores = await searchAnalysis(
+      "科技活动",
+      10,
+      ["asset-1", "asset-2", "below-threshold"],
+      { minimumSimilarity: 0 },
+    );
+    expect(unfilteredScores.get("below-threshold")).toBeCloseTo(0.4);
   });
 });
