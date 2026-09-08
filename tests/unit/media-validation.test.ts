@@ -3,9 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
 import { validateMediaFile } from "@/server/media/validate";
+import * as mediaCommands from "@/server/media/ffmpeg";
 
 const execFileAsync = promisify(execFile);
 
@@ -16,14 +17,14 @@ async function probeVideo(filePath: string) {
     "-select_streams",
     "v:0",
     "-show_entries",
-    "format=format_name:stream=codec_name,pix_fmt",
+    "format=format_name:stream=codec_name,pix_fmt,color_range",
     "-of",
     "json",
     filePath,
   ]);
   return JSON.parse(stdout) as {
     format: { format_name: string };
-    streams: Array<{ codec_name: string; pix_fmt: string }>;
+    streams: Array<{ codec_name: string; pix_fmt: string; color_range?: string }>;
   };
 }
 
@@ -37,6 +38,7 @@ describe("media validation", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -137,6 +139,73 @@ describe("media validation", () => {
     });
     expect((await fs.stat(filePath)).size).toBe(validated.sizeBytes);
   }, 15_000);
+
+  it("normalizes full-range video to browser-compatible limited range", async () => {
+    const filePath = path.join(directory, "full-range.mp4");
+    await execFileAsync("ffmpeg", [
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=blue:s=16x16:d=0.2",
+      "-vf",
+      "scale=in_range=tv:out_range=pc",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuvj420p",
+      "-color_range",
+      "pc",
+      "-y",
+      filePath,
+    ]);
+    expect((await probeVideo(filePath)).streams[0]?.pix_fmt).toBe("yuvj420p");
+
+    await validateMediaFile(filePath, "full-range.mp4");
+
+    expect((await probeVideo(filePath)).streams[0]?.pix_fmt).toBe("yuv420p");
+  }, 15_000);
+
+  it.each(["mp4", "avi"])(
+    "transcodes full-range metadata even when %s input is reported as yuv420p",
+    async (container) => {
+      const filePath = path.join(directory, `range-metadata-${container}.mp4`);
+      await execFileAsync("ffmpeg", [
+        "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=16x16:d=0.2",
+        "-vf", "scale=in_range=tv:out_range=pc", "-c:v", "libx264",
+        "-pix_fmt", "yuvj420p", "-color_range", "pc", "-f", container,
+        "-y", filePath,
+      ]);
+      const runMediaCommand = mediaCommands.runMediaCommand;
+      const commands = vi.spyOn(mediaCommands, "runMediaCommand")
+        .mockImplementation(async (...args) => {
+          const result = await runMediaCommand(...args);
+          if (args[0] !== "ffprobe" || !args[1].includes(filePath)) return result;
+          // Some probe versions report range separately instead of using yuvj420p.
+          const payload = JSON.parse(result.stdout);
+          const stream = payload.streams.find(
+            (candidate: { codec_type: string }) => candidate.codec_type === "video",
+          );
+          stream.pix_fmt = "yuv420p";
+          stream.color_range = "pc";
+          return { ...result, stdout: JSON.stringify(payload) };
+        });
+
+      await validateMediaFile(filePath, "range-metadata.mp4");
+
+      const conversion = commands.mock.calls.find(
+        ([command, args]) => command === "ffmpeg" && args.includes("+faststart"),
+      );
+      expect(conversion?.[1]).toContain("libx264");
+      expect(conversion?.[1]).toContain("scale=in_range=auto:out_range=tv");
+      const output = (await probeVideo(filePath)).streams[0];
+      expect(output.pix_fmt).toBe("yuv420p");
+      // H.264 may omit the range flag when using its default limited range.
+      expect(output.color_range).not.toBe("pc");
+    },
+    15_000,
+  );
 
   it("remuxes a 3GP container renamed to MP4 into an actual MP4 brand", async () => {
     const filePath = path.join(directory, "renamed-3gp.mp4");
