@@ -414,6 +414,13 @@ function normalizeAnalysisPayload(
   const base: Record<string, unknown> = { ...candidate };
   delete base.primaryCategory;
   if (candidate.kind === "image") {
+    const ocr = candidate.ocr;
+    if (ocr && typeof ocr === "object" && !Array.isArray(ocr)) {
+      const fields = ocr as Record<string, unknown>;
+      if (typeof fields.text === "string") {
+        base.ocr = { ...fields, text: Array.from(fields.text).slice(0, 600).join("") };
+      }
+    }
     return {
       ...base,
       ...(tags
