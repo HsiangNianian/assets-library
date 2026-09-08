@@ -39,6 +39,28 @@ test("overview and upload pages expose the MVP scope", async ({ page }) => {
   await expect(
     page.getByPlaceholder("搜索标签、场景或风格"),
   ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "公共素材", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+  await page.getByRole("button", { name: "个人素材", exact: true }).click();
+  await expect(
+    page
+      .getByRole("combobox", { name: "选择素材所属用户" })
+      .or(page.getByText("暂无已注册用户", { exact: true })),
+  ).toBeVisible();
+  await page.getByRole("link", { name: "公共素材", exact: true }).click();
+  await expect(
+    page.getByRole("link", { name: "公共素材", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+
+  await page.getByPlaceholder("搜索标签、场景或风格").fill("smoke-search");
+  await page.getByRole("button", { name: "搜索标签" }).click();
+  await expect(page).toHaveURL(/tag=smoke-search/);
+  await expect(page).not.toHaveURL(/\/lock/);
+  await page
+    .getByRole("link", { name: "清除搜索", exact: true })
+    .click();
+  await expect(page).not.toHaveURL(/tag=smoke-search/);
   await page.getByRole("link", { name: "列表视图" }).click();
   await expect(page).toHaveURL(/layout=list/);
   await page.getByRole("link", { name: "画廊视图" }).click();
@@ -116,8 +138,11 @@ test("submits selected assets through one manifest task", async ({
       received_bytes: done ? png.length : 0,
       total_bytes: png.length,
       progress_percent: done ? 100 : 0,
-      asset_ids: done
+      private_asset_ids: done
         ? [`10000000-0000-4000-8000-00000000001${index}`]
+        : [],
+      public_asset_ids: done
+        ? [`20000000-0000-4000-8000-00000000001${index}`]
         : [],
       error: null,
     })),
@@ -220,7 +245,8 @@ test("shows an asynchronous media validation error without requiring hover", asy
         received_bytes: fileSize,
         total_bytes: fileSize,
         progress_percent: failed ? 100 : 0,
-        asset_ids: [],
+        private_asset_ids: [],
+        public_asset_ids: [],
         error: failed ? { code: "corrupt_file", message: failureMessage } : null,
       },
     ],
