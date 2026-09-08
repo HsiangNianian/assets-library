@@ -207,6 +207,7 @@ FROM (
 	UNION ALL SELECT 'analysis_results', '素材核心', '公私素材各自的模型分析结果。', (SELECT COUNT(*) FROM `analysis_results`)
 	UNION ALL SELECT 'asset_tag_rejections', '素材核心', '公私素材独立拒绝的模型标签。', (SELECT COUNT(*) FROM `asset_tag_rejections`)
 	UNION ALL SELECT 'asset_tags', '素材核心', '公私素材与标签的多对多关系。', (SELECT COUNT(*) FROM `asset_tags`)
+	UNION ALL SELECT 'assets', 'Legacy', 'Retained legacy assets pending migration validation.', (SELECT COUNT(*) FROM `assets`)
 	UNION ALL SELECT 'private_assets', '素材核心', '用户个人素材。', (SELECT COUNT(*) FROM `private_assets`)
 	UNION ALL SELECT 'public_assets', '素材核心', '公共审核与浏览素材。', (SELECT COUNT(*) FROM `public_assets`)
 	UNION ALL SELECT 'callback_deliveries', '异步任务', '任务回调的逐次 HTTP 投递记录。', (SELECT COUNT(*) FROM `callback_deliveries`)
