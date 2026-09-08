@@ -13,6 +13,7 @@ import {
 interface ProbedVideo {
   audioCodecName: string | null;
   codecName: string;
+  colorRange: string;
   durationSeconds: number;
   formatNames: Set<string>;
   majorBrand: string;
@@ -28,6 +29,7 @@ interface ProbePayload {
   streams?: Array<{
     codec_name?: string;
     codec_type?: string;
+    color_range?: string;
     disposition?: { attached_pic?: number };
     duration?: string;
     height?: number;
@@ -92,7 +94,7 @@ async function probeVideo(filePath: string): Promise<ProbedVideo> {
       "-format_whitelist",
       videoInputFormats,
       "-show_entries",
-      "format=format_name,duration:format_tags=major_brand:stream=codec_type,codec_name,pix_fmt,width,height,duration:stream_disposition=attached_pic",
+      "format=format_name,duration:format_tags=major_brand:stream=codec_type,codec_name,pix_fmt,color_range,width,height,duration:stream_disposition=attached_pic",
       "-of",
       "json",
       filePath,
@@ -127,6 +129,7 @@ async function probeVideo(filePath: string): Promise<ProbedVideo> {
       payload.streams?.find((candidate) => candidate.codec_type === "audio")
         ?.codec_name ?? null,
     codecName: stream.codec_name,
+    colorRange: stream.color_range ?? "",
     durationSeconds,
     formatNames: new Set(
       (payload.format?.format_name ?? "")
@@ -145,6 +148,7 @@ function isBrowserCompatibleMp4(probe: ProbedVideo) {
     mp4MajorBrands.has(probe.majorBrand.toLowerCase()) &&
     probe.codecName === "h264" &&
     probe.pixelFormat === "yuv420p" &&
+    probe.colorRange !== "pc" &&
     (!probe.audioCodecName || probe.audioCodecName === "aac")
   );
 }
@@ -194,10 +198,13 @@ async function normalizeVideoFormat(
 ) {
   const canCopyVideo =
     sourceProbe.codecName === "h264" &&
-    sourceProbe.pixelFormat === "yuv420p";
+    sourceProbe.pixelFormat === "yuv420p" &&
+    sourceProbe.colorRange !== "pc";
   const videoCodecArgs = canCopyVideo
     ? ["-c:v", "copy"]
     : [
+        "-vf",
+        "scale=in_range=auto:out_range=tv",
         "-c:v",
         "libx264",
         "-preset",
@@ -206,6 +213,8 @@ async function normalizeVideoFormat(
         "23",
         "-pix_fmt",
         "yuv420p",
+        "-color_range",
+        "tv",
       ];
   return replaceWithNormalizedMedia(
     filePath,
