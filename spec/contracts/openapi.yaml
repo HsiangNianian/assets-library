@@ -20,6 +20,8 @@ tags:
     description: 支持 Range 的媒体流
   - name: Users
     description: 用户素材空间统计和展示列表
+  - name: Compatibility
+    description: 旧剪辑业务兼容接口
   - name: Specification
 paths:
   /api/v1/openapi:
@@ -40,7 +42,7 @@ paths:
       tags: [Uploads]
       operationId: createUploadTask
       summary: 创建上传任务和文件清单
-      description: 每个任务最多 100 个文件，总声明大小最多 2 GiB。
+      description: 每个任务最多 100 个文件，总声明大小最多 2 GiB；填写 user_id 时同时创建互相独立、均待审核的私人素材和公共副本。
       requestBody:
         required: true
         content:
@@ -51,7 +53,6 @@ paths:
                 value:
                   user_id: user_123
                   callback_url: null
-                  auto_publish: false
                   items:
                     - filename: product.png
                       size_bytes: 182304
@@ -143,7 +144,7 @@ paths:
       tags: [Tasks]
       operationId: getTask
       summary: 查询任意异步任务的总体和逐文件进度
-      description: 统一查询 upload、update、publish、retry、delete 任务。
+      description: 统一查询 upload、update、publish、retry、delete、match 任务。
       parameters:
         - $ref: "#/components/parameters/TaskId"
       responses:
@@ -155,12 +156,53 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/compat/segment-match:
+    post:
+      tags: [Compatibility]
+      operationId: createCompatibilitySegmentMatch
+      summary: 异步对齐 ASR/LLM 分段并匹配素材
+      description: >-
+        兼容两种旧剪辑业务格式：存在 ASR transcripts 时，Worker 按顺序生成
+        start_time、end_time 和 group_id；ASR 为空时，直接复用 LLM segments 已有的
+        时间轴字段。两种格式都复用现有描述语义匹配函数为每段选择至多一个素材。
+        请求中的未知顶层字段会原样透传到终态回调。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CompatibilityMatchRequest" }
+      callbacks:
+        matchFinished:
+          '{$request.body#/callback_url}':
+            post:
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema: { $ref: "#/components/schemas/CompatibilityMatchCallback" }
+              responses:
+                "200": { description: 回调已接收；任意 2xx 均视为成功 }
+      responses:
+        "202":
+          description: 匹配任务已持久化并进入队列
+          headers:
+            Location:
+              schema: { type: string }
+              description: 统一任务查询地址
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CompatibilityMatchAccepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "413": { $ref: "#/components/responses/ContentTooLarge" }
+
   /api/v1/assets/query:
     post:
       tags: [Assets]
       operationId: queryAssets
       summary: 浏览或语义搜索素材
-      description: 统一游标分页、语义搜索、受控 filter 和标签统计。
+      description: >-
+        统一游标分页、语义搜索、受控 filter 和标签统计。public 与 exclude_user
+        始终只查询公共表，不会把私人素材扩展进公共结果。
       requestBody:
         required: true
         content:
@@ -226,11 +268,11 @@ paths:
     delete:
       tags: [Assets]
       operationId: deleteAsset
-      summary: 异步删除或转公共素材
+      summary: 异步删除指定作用域的素材
       description: >-
-        非空 user_id 表示个人删除：只清空归属，使素材成为公共素材。
-        user_id 为空表示公共硬删除：清理 MySQL、ZOS 和 Chroma；删除最后一个
-        视频切片时同时回收父视频。
+        非空 user_id 只删除该用户的私人记录、分析、索引和 ZOS 对象；为空则
+        删除公共素材。公私删除互不影响，删除某一侧最后一个视频切片时只回收
+        该侧父视频对象。
       requestBody:
         required: false
         content:
@@ -293,7 +335,8 @@ paths:
     post:
       tags: [Assets]
       operationId: publishAsset
-      summary: 异步发布已完成分析的素材
+      summary: 异步发布已完成分析的公共或私人素材
+      description: 公共素材不传 user_id；私人素材必须传入所属 user_id。公私审核状态互不联动。
       parameters:
         - $ref: "#/components/parameters/AssetId"
       requestBody:
@@ -579,7 +622,7 @@ components:
       enum: [queued, running, done, failed]
     TaskType:
       type: string
-      enum: [upload, delete, publish, update, retry]
+      enum: [upload, delete, publish, update, retry, match]
     TaskPhase:
       type: string
       enum:
@@ -593,6 +636,7 @@ components:
         - updating
         - retrying
         - deleting
+        - matching
         - notifying
         - finished
     MediaType:
@@ -621,6 +665,185 @@ components:
           pattern: '^https?://'
         - type: "null"
       default: null
+
+    CompatibilityMatchRequest:
+      type: object
+      additionalProperties: true
+      required: [asr, llm, callback_url]
+      properties:
+        asr:
+          description: 可传 ASR transcripts；LLM segments 已带时间轴时也可传空对象。
+          type: object
+          additionalProperties: true
+          properties:
+            transcripts:
+              type: array
+              minItems: 1
+              items:
+                type: object
+                additionalProperties: true
+                required: [sentences]
+                properties:
+                  sentences:
+                    type: array
+                    minItems: 1
+                    items:
+                      type: object
+                      additionalProperties: true
+                      required: [text, words]
+                      properties:
+                        text: { type: string }
+                        words:
+                          type: array
+                          minItems: 1
+                          items:
+                            type: object
+                            additionalProperties: true
+                            required: [text, begin_time, end_time]
+                            properties:
+                              text: { type: string }
+                              begin_time: { type: integer, minimum: 0 }
+                              end_time: { type: integer, minimum: 0 }
+                              punctuation: { type: string }
+        llm:
+          description: 包含 segments 数组的 JSON 字符串，也兼容直接传对象。
+          oneOf:
+            - { type: string }
+            - type: object
+              additionalProperties: true
+              required: [segments]
+              properties:
+                segments:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: object
+                    additionalProperties: true
+                    required: [segment_id, text, level]
+                    properties:
+                      segment_id: { type: integer, minimum: 1 }
+                      text: { type: string, minLength: 1 }
+                      high_light_word: { type: string }
+                      keyword: { type: string }
+                      level: { type: integer, minimum: 0 }
+                      group_id:
+                        type: array
+                        minItems: 2
+                        maxItems: 2
+                        prefixItems:
+                          - { type: number }
+                          - { type: number }
+                      start_time: { type: number }
+                      end_time: { type: number }
+        text: { type: string }
+        asset_url_list:
+          type: array
+          default: []
+          items:
+            oneOf:
+              - { type: string, format: uri }
+              - type: object
+                additionalProperties: true
+                required: [file_url, type]
+                properties:
+                  file_url: { type: string, format: uri }
+                  type: { type: string }
+        is_random:
+          type: boolean
+          default: true
+          description: >-
+            true 时从当前语义召回且超过 semantic_threshold 的不同素材中等概率随机选择；
+            false 时选择语义分最高的素材。
+            两种模式均按分段顺序在召回前排除本任务已用的素材，剩余候选不足时返回未匹配。
+        semantic_threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.3
+          description: 语义召回阈值；只有分数严格大于该值的素材可以命中。
+        callback_url:
+          type: string
+          format: uri
+          pattern: '^https?://'
+
+    CompatibilityMatchAccepted:
+      type: object
+      additionalProperties: false
+      required: [taskId, status]
+      properties:
+        taskId: { type: string, format: uuid }
+        status: { type: string, const: processing }
+
+    CompatibilityMatchSegment:
+      type: object
+      additionalProperties: true
+      required:
+        [segment_id, text, keyword, level, group_id, start_time, end_time,
+         matched_candidate_url, matched_candidate_type, matched_candidate_desc,
+         matched_candidate_score, matched_candidate_reason,
+         matched_candidate_message]
+      properties:
+        segment_id: { type: integer, minimum: 1 }
+        text: { type: string }
+        keyword: { type: string }
+        level: { type: integer, minimum: 0 }
+        group_id:
+          type: array
+          minItems: 2
+          maxItems: 2
+          prefixItems:
+            - { type: integer, minimum: 1 }
+            - { type: integer, minimum: 1 }
+        start_time: { type: number, minimum: 0 }
+        end_time: { type: number, minimum: 0 }
+        matched_candidate_url:
+          oneOf:
+            - { type: string, format: uri }
+            - { type: "null" }
+        matched_candidate_type:
+          oneOf:
+            - { $ref: "#/components/schemas/MediaType" }
+            - { type: "null" }
+        matched_candidate_desc:
+          oneOf:
+            - { type: string }
+            - { type: "null" }
+        matched_candidate_score:
+          description: 命中分数；未命中但存在低分候选时为阈值过滤前最高分。
+          oneOf:
+            - { type: number, minimum: 0, maximum: 1 }
+            - { type: "null" }
+        matched_candidate_reason:
+          description: 命中时为 null；未命中时说明原因。
+          oneOf:
+            - type: string
+              enum: [no_candidates, below_threshold, semantic_unavailable,
+                     fallback_exhausted]
+            - { type: "null" }
+        matched_candidate_message:
+          description: 命中时为 null；未命中时为可直接展示的说明。
+          oneOf:
+            - { type: string }
+            - { type: "null" }
+
+    CompatibilityMatchCallback:
+      type: object
+      additionalProperties: true
+      required: [taskId, status, completed_at]
+      properties:
+        taskId: { type: string, format: uuid }
+        status: { type: string, enum: [success, failed] }
+        result:
+          type: object
+          additionalProperties: false
+          required: [segments]
+          properties:
+            segments:
+              type: array
+              items: { $ref: "#/components/schemas/CompatibilityMatchSegment" }
+        error: { $ref: "#/components/schemas/ApiError" }
+        completed_at: { type: string }
     Tag:
       type: object
       additionalProperties: false
@@ -668,15 +891,11 @@ components:
     CreateUploadTask:
       type: object
       additionalProperties: false
-      description: 三步上传的第一步请求；默认创建公共、待人工发布的素材。
+      description: 三步上传的第一步请求；user_id 为空只创建公共素材，非空同时创建公私两份。
       required: [items]
       properties:
         user_id: { $ref: "#/components/schemas/NullableUserId" }
         callback_url: { $ref: "#/components/schemas/CallbackUrl" }
-        auto_publish:
-          type: boolean
-          default: false
-          description: true 时各素材分析成功后自动发布；不改变视频整批校验边界。
         items:
           type: array
           minItems: 1
@@ -687,7 +906,7 @@ components:
     TaskItem:
       type: object
       additionalProperties: false
-      description: 任务中一个上传文件的进度；视频文件的 asset_ids 可包含多个切片素材。
+      description: 任务中一个上传文件的进度；视频 ID 数组按 segment_index 排序。
       required:
         - item_id
         - filename
@@ -697,7 +916,8 @@ components:
         - received_bytes
         - total_bytes
         - progress_percent
-        - asset_ids
+        - private_asset_ids
+        - public_asset_ids
         - error
       properties:
         item_id:
@@ -714,9 +934,13 @@ components:
         received_bytes: { type: integer, minimum: 0 }
         total_bytes: { type: integer, minimum: 0 }
         progress_percent: { type: number, minimum: 0, maximum: 100 }
-        asset_ids:
+        private_asset_ids:
           type: array
-          description: 已成功建档的素材 ID；视频父源本身不会出现在此数组。
+          description: 已成功建档的私人素材 ID。
+          items: { type: string, format: uuid }
+        public_asset_ids:
+          type: array
+          description: 已成功建档的公共素材 ID。
           items: { type: string, format: uuid }
         error:
           oneOf:
@@ -798,7 +1022,8 @@ components:
             received_bytes: 182304
             total_bytes: 182304
             progress_percent: 100
-            asset_ids: [96102b40-3f0a-46ac-9d64-15e75d1981d5]
+            private_asset_ids: [96102b40-3f0a-46ac-9d64-15e75d1981d5]
+            public_asset_ids: [a8561ef7-ed4d-4a66-84ce-5285d321e13e]
             error: null
         error: null
         created_at: "2026-08-12T10:17:00.000+08:00"
@@ -882,7 +1107,7 @@ components:
         created_at: { type: string, format: date-time }
 
     UserScope:
-      description: 素材查询的显式归属范围；默认使用 public。
+      description: 素材查询的显式归属范围；public 仅公共，user 仅指定用户私人素材，exclude_user 仅公共并排除指定上传者，all 合并两表。
       discriminator: { propertyName: mode }
       oneOf:
         - type: object
@@ -998,8 +1223,65 @@ components:
           description: 已带必要 user_id 作用域的媒体读取相对 URL。
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
-        search_score: { type: number }
-        semantic_score: { type: number, minimum: 0, maximum: 1 }
+        search_score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 最终排序分；仅检索结果出现，且仅超过 search.threshold 的素材会返回。
+        keyword_score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 关键词匹配分；语义-only 结果可以省略。
+        semantic_score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 语义相似度；关键词-only 结果可以省略。
+        match_type:
+          type: string
+          enum: [exact, alias, prefix, contains, typo, semantic, hybrid]
+          description: 生成最终分数的主要匹配方式。
+        matched_terms:
+          type: array
+          items: { type: string }
+          description: 实际命中的规范化查询词。
+        matched_categories:
+          type: array
+          items: { type: string }
+          description: 命中标签所属分类，例如 scene、style 或 form。
+    AssetSearchMeta:
+      type: object
+      additionalProperties: false
+      required: [mode, threshold, max_score, reason, message]
+      description: 本次检索的阈值和结果说明；普通浏览时响应中的 search 为 null。
+      properties:
+        mode:
+          type: string
+          enum: [keyword, semantic, hybrid]
+        threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 本次最终展示阈值；结果必须严格大于该值。
+        max_score:
+          description: 阈值过滤前的最高候选分；没有候选或语义服务不可用时为 null。
+          oneOf:
+            - { type: number, minimum: 0, maximum: 1 }
+            - { type: "null" }
+        reason:
+          type: string
+          enum:
+            - matched
+            - no_candidates
+            - below_threshold
+            - semantic_unavailable
+            - fallback_exhausted
+        message:
+          description: matched 时为 null；空结果或服务不可用时提供可直接展示的说明。
+          oneOf:
+            - { type: string }
+            - { type: "null" }
     TagStatistic:
       type: object
       required: [category, value, asset_count, asset_share]
@@ -1039,8 +1321,8 @@ components:
     AssetQueryResponse:
       type: object
       additionalProperties: false
-      description: 游标分页结果；无下一页时 next_cursor 为 null。
-      required: [items, next_cursor, has_more, tag_statistics]
+      description: 游标分页或语义 top-k 结果；无下一页时 next_cursor 为 null。
+      required: [items, next_cursor, has_more, tag_statistics, search]
       properties:
         items:
           type: array
@@ -1051,6 +1333,11 @@ components:
         tag_statistics:
           oneOf:
             - { $ref: "#/components/schemas/TagStatistics" }
+            - { type: "null" }
+        search:
+          description: 检索诊断和空结果消息；未提供 query/keywords 的普通浏览为 null。
+          oneOf:
+            - { $ref: "#/components/schemas/AssetSearchMeta" }
             - { type: "null" }
 
     UserStorageUsageItem:
@@ -1212,7 +1499,6 @@ components:
             - original_filename
             - mime_type
             - size_bytes
-            - auto_publish
             - segment_start_seconds
             - segment_end_seconds
             - failure
@@ -1221,7 +1507,6 @@ components:
             original_filename: { type: string }
             mime_type: { type: string }
             size_bytes: { type: integer, minimum: 0 }
-            auto_publish: { type: boolean }
             segment_start_seconds:
               description: 视频分镜在父视频中的绝对起始秒；图片为 null。
               oneOf: [{ type: number, minimum: 0 }, { type: "null" }]
