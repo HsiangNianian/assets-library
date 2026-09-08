@@ -2,13 +2,14 @@ import crypto from "node:crypto";
 import { eq } from "drizzle-orm";
 import { db } from "@/server/db";
 import { apiTaskErrorPayload } from "@/server/modules/tasks/task-service";
-import { assets, callbackDeliveries, taskItems, tasks } from "@/server/db/schema";
+import { assetEntries, callbackDeliveries, taskItems, tasks } from "@/server/db/schema";
 import {
   completeJob,
   failJob,
   requeueJob,
   type ClaimedJob,
 } from "@/server/repositories/assets";
+import { compatibilityCallbackFromJob } from "@/server/services/compatibility-match";
 
 const maximumAttempts = 5;
 const maximumResponseCharacters = 4_096;
@@ -23,7 +24,8 @@ function shanghaiIso(value: Date | null) {
 function callbackBody(
   task: typeof tasks.$inferSelect,
   items: Array<typeof taskItems.$inferSelect>,
-  assetIdsByItem: Map<string, string[]>,
+  publicAssetIdsByItem: Map<string, string[]>,
+  privateAssetIdsByItem: Map<string, string[]>,
 ) {
   return {
     task_id: task.id,
@@ -38,21 +40,26 @@ function callbackBody(
     total_items: task.totalItems,
     result: task.result,
     error: apiTaskErrorPayload(task),
-    items: items.map((item) => ({
-      item_id: item.id,
-      filename: item.filename,
-      media_type: item.mediaType,
-      status: item.status,
-      phase: item.phase,
-      received_bytes: item.receivedBytes,
-      total_bytes: item.totalBytes,
-      progress_percent:
-        item.totalBytes > 0
-          ? Math.min(100, (item.receivedBytes / item.totalBytes) * 100)
-          : 0,
-      asset_ids: assetIdsByItem.get(item.id) ?? [],
-      error: apiTaskErrorPayload(item),
-    })),
+    items: items.map((item) => {
+      const publicAssetIds = publicAssetIdsByItem.get(item.id) ?? [];
+      const privateAssetIds = privateAssetIdsByItem.get(item.id) ?? [];
+      return {
+        item_id: item.id,
+        filename: item.filename,
+        media_type: item.mediaType,
+        status: item.status,
+        phase: item.phase,
+        received_bytes: item.receivedBytes,
+        total_bytes: item.totalBytes,
+        progress_percent:
+          item.totalBytes > 0
+            ? Math.min(100, (item.receivedBytes / item.totalBytes) * 100)
+            : 0,
+        private_asset_ids: privateAssetIds,
+        public_asset_ids: publicAssetIds,
+        error: apiTaskErrorPayload(item),
+      };
+    }),
     created_at: shanghaiIso(task.createdAt),
     started_at: shanghaiIso(task.startedAt),
     finished_at: shanghaiIso(task.finishedAt),
@@ -80,17 +87,27 @@ export async function processCallbackJob(job: ClaimedJob) {
     .from(taskItems)
     .where(eq(taskItems.taskId, task.id));
   const assetRows = await db
-    .select({ id: assets.id, taskItemId: assets.taskItemId })
-    .from(assets)
-    .where(eq(assets.taskId, task.id));
-  const assetIdsByItem = new Map<string, string[]>();
+    .select({
+      id: assetEntries.id,
+      kind: assetEntries.kind,
+      taskItemId: assetEntries.taskItemId,
+      segmentIndex: assetEntries.segmentIndex,
+    })
+    .from(assetEntries)
+    .where(eq(assetEntries.taskId, task.id));
+  const publicAssetIdsByItem = new Map<string, string[]>();
+  const privateAssetIdsByItem = new Map<string, string[]>();
+  assetRows.sort((left, right) => (left.segmentIndex ?? 0) - (right.segmentIndex ?? 0));
   for (const asset of assetRows) {
     if (!asset.taskItemId) continue;
-    const ids = assetIdsByItem.get(asset.taskItemId) ?? [];
+    const target = asset.kind === "private" ? privateAssetIdsByItem : publicAssetIdsByItem;
+    const ids = target.get(asset.taskItemId) ?? [];
     ids.push(asset.id);
-    assetIdsByItem.set(asset.taskItemId, ids);
+    target.set(asset.taskItemId, ids);
   }
-  const body = callbackBody(task, items, assetIdsByItem);
+  const body =
+    compatibilityCallbackFromJob(job) ??
+    callbackBody(task, items, publicAssetIdsByItem, privateAssetIdsByItem);
   const deliveryId = crypto.randomUUID();
   const startedAt = new Date();
   await db.insert(callbackDeliveries).values({
