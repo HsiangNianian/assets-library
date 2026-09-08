@@ -60,8 +60,11 @@ export interface KeywordScoringOptions {
   aliases?: readonly (readonly string[])[];
 }
 
+const AI_BUSINESS_ALIASES: readonly string[] = [
+  "ai", "aigc", "人工智能", "生成式人工智能", "智能科技",
+];
 export const DEFAULT_BUSINESS_ALIASES: readonly (readonly string[])[] = [
-  ["ai", "aigc", "人工智能", "生成式人工智能", "智能科技"],
+  AI_BUSINESS_ALIASES,
 ];
 
 const MATCH_QUALITY: Readonly<Record<LexicalMatchType, number>> = {
@@ -165,16 +168,20 @@ function segmentUnprotectedText(text: string) {
   if (!text) return [];
   if (typeof Intl.Segmenter === "function") {
     const segmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
-    const segmented = [...segmenter.segment(text)]
-      .filter((part) => part.isWordLike)
-      .map((part) => normalizeSearchText(part.segment))
-      .filter(Boolean);
+    const tokens: string[] = [];
+    let previousEnd = -1;
     // Segmenter 会把罕见字/错别字拆成单字；把尾随单字并回相邻汉语词，
     // 否则“城巿”会退化成“城”的前缀命中，无法进入真正的 typo 层。
-    return segmented.reduce<string[]>((tokens, token) => {
+    for (const part of segmenter.segment(text)) {
+      const token = normalizeSearchText(part.segment);
+      if (!part.isWordLike || !token) {
+        previousEnd = -1;
+        continue;
+      }
       const previous = tokens.at(-1);
       if (
         previous &&
+        previousEnd === part.index &&
         hanTokenPattern.test(previous) &&
         hanTokenPattern.test(token) &&
         Array.from(token).length === 1
@@ -183,8 +190,9 @@ function segmentUnprotectedText(text: string) {
       } else {
         tokens.push(token);
       }
-      return tokens;
-    }, []);
+      previousEnd = part.index + part.segment.length;
+    }
+    return tokens;
   }
   return text.match(/[\p{Script=Han}]+|[\p{L}\p{N}_-]+/gu) ?? [];
 }
@@ -443,8 +451,10 @@ export function isBroadAiQuery(
     ? tokenizeKeywordQuery(queryOrTokens, aliases)
     : queryOrTokens.map(normalizeSearchText).filter(Boolean);
   if (tokens.length !== 1) return false;
-  const aiGroup = normalizedAliasGroups(aliases)[0] ?? [];
-  return aiGroup.includes(tokens[0]);
+  return normalizedAliasGroups(aliases).some(
+    (group) => group.some((term) => AI_BUSINESS_ALIASES.includes(term)) &&
+      group.includes(tokens[0]),
+  );
 }
 
 export function hybridRelevanceScore(
