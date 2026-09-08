@@ -1,4 +1,3 @@
-import Link from "next/link";
 import {
   ArrowRight,
   ChevronLeft,
@@ -10,17 +9,26 @@ import {
   X,
 } from "lucide-react";
 import { AssetOverviewGrid } from "@/components/asset-overview-grid";
+import { AssetScopeSwitcher } from "@/components/asset-scope-switcher";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { serverApiV1 } from "@/lib/server-api-v1";
+import { WebUiLink } from "@/components/webui-link";
+import { serverApiV1, serverWebUiApi } from "@/lib/server-api-v1";
 import { appUrl } from "@/lib/paths";
-import type { AssetQueryResponse, UserScope } from "@/shared/contracts";
+import { detectSearchInputMode } from "@/server/search/relevance";
+import { userDirectoryResponseSchema } from "@/shared/contracts";
+import type {
+  AssetQueryResponse,
+  UserDirectoryResponse,
+  UserScope,
+} from "@/shared/contracts";
 
 export const dynamic = "force-dynamic";
 
 type AssetOverviewView = "pending" | "published";
 type OverviewLayout = "gallery" | "list";
+type LibraryScope = "public" | "private";
 
 function firstParameter(value?: string | string[]) {
   return Array.isArray(value) ? value[0] : value;
@@ -48,8 +56,9 @@ function overviewHref(input: {
   tag?: string;
   layout?: OverviewLayout;
   userId?: string;
+  scope: LibraryScope;
 }) {
-  const parameters = new URLSearchParams({ view: input.view });
+  const parameters = new URLSearchParams({ view: input.view, scope: input.scope });
   if (input.cursor) parameters.set("cursor", input.cursor);
   if (input.history?.length) {
     parameters.set(
@@ -75,6 +84,7 @@ export default async function OverviewPage({
     view?: string | string[];
     layout?: string | string[];
     user_id?: string | string[];
+    scope?: string | string[];
   }>;
 }) {
   const parameters = await searchParams;
@@ -86,32 +96,74 @@ export default async function OverviewPage({
     view === "published"
       ? firstParameter(parameters.tag)?.trim().slice(0, 128) ?? ""
       : "";
+  const searchMode = tagQuery ? detectSearchInputMode(tagQuery) : null;
   const userId = firstParameter(parameters.user_id)?.trim().slice(0, 191) ?? "";
+  const scope: LibraryScope =
+    firstParameter(parameters.scope) === "private" && userId
+      ? "private"
+      : "public";
+  const effectiveView = view;
   const cursor = firstParameter(parameters.cursor) ?? null;
   const history = decodeHistory(firstParameter(parameters.history));
-  const userScope: UserScope = userId
+  const userScope: UserScope = scope === "private"
     ? { mode: "user", user_id: userId }
-    : { mode: "public" };
-  const page = await serverApiV1<AssetQueryResponse>("/assets/query", {
-    method: "POST",
-    body: JSON.stringify({
-      ...(tagQuery ? { keywords: [tagQuery] } : {}),
-      filter: {
-        user_scope: userScope,
-        review_statuses: [
-          view === "published" ? "published" : "pending_review",
-        ],
-      },
-      cursor,
-      limit: 8,
-      include_tag_statistics: true,
+    : userId
+      ? { mode: "exclude_user", user_id: userId }
+      : { mode: "public" };
+  const [page, userDirectory] = await Promise.all([
+    serverApiV1<AssetQueryResponse>("/assets/query", {
+      method: "POST",
+      body: JSON.stringify({
+        ...(searchMode === "semantic"
+          ? { query: tagQuery }
+          : searchMode === "keyword"
+            ? { keywords: [tagQuery] }
+            : {}),
+        filter: {
+          user_scope: userScope,
+          review_statuses: [
+            effectiveView === "published" ? "published" : "pending_review",
+          ],
+        },
+        cursor,
+        limit: 8,
+        include_tag_statistics: true,
+      }),
     }),
-  });
-  const common = { view, tag: tagQuery, layout, userId };
+    serverWebUiApi<UserDirectoryResponse>("/users")
+      .then((directory) => userDirectoryResponseSchema.parse(directory))
+      .catch((): UserDirectoryResponse => ({ items: [] })),
+  ]);
+  const common = { view: effectiveView, tag: tagQuery, layout, userId, scope };
   const uploadHref = userId
     ? appUrl(`/upload?user_id=${encodeURIComponent(userId)}`)
     : appUrl("/upload");
   const total = page.tag_statistics?.total_assets ?? page.items.length;
+  const currentUser = userDirectory.items.find(
+    (user) => user.user_id === userId,
+  );
+  const scopeDescription = scope === "private"
+    ? currentUser?.display_name
+      ? `${currentUser.display_name} (${userId})`
+      : `用户 ${userId} 的素材`
+    : "公共素材库";
+  const publicScopeHref = overviewHref({
+    view: effectiveView,
+    tag: tagQuery,
+    layout,
+    userId,
+    scope: "public",
+  });
+  const userOptions = userDirectory.items.map((user) => ({
+    ...user,
+    href: overviewHref({
+      view: "published",
+      tag: tagQuery,
+      layout,
+      userId: user.user_id,
+      scope: "private",
+    }),
+  }));
 
   return (
     <main className="mx-auto max-w-7xl px-5 py-7 sm:py-9">
@@ -121,15 +173,22 @@ export default async function OverviewPage({
             素材库
           </h1>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            {userId ? `用户 ${userId} 的素材` : "公共素材库"}
+            {scopeDescription}
           </p>
         </div>
         <Button asChild>
-          <Link href={uploadHref}>
+          <WebUiLink href={uploadHref}>
             添加新素材 <ArrowRight className="size-4" />
-          </Link>
+          </WebUiLink>
         </Button>
       </section>
+
+      <AssetScopeSwitcher
+        currentUserId={userId}
+        currentScope={scope}
+        publicHref={publicScopeHref}
+        users={userOptions}
+      />
 
       <div className="mb-7 flex flex-col gap-3 rounded-[1.5rem] border border-black/[0.06] bg-white/70 p-3 shadow-sm backdrop-blur-xl dark:border-white/[0.10] dark:bg-white/[0.06] sm:flex-row sm:items-center">
         <nav
@@ -138,29 +197,34 @@ export default async function OverviewPage({
         >
           <Button
             asChild
-            variant={view === "published" ? "default" : "ghost"}
+            variant={effectiveView === "published" ? "default" : "ghost"}
             size="sm"
           >
-            <Link href={overviewHref({ ...common, view: "published" })}>
+            <WebUiLink href={overviewHref({ ...common, view: "published" })}>
               已入库
-            </Link>
+            </WebUiLink>
           </Button>
           <Button
             asChild
-            variant={view === "pending" ? "default" : "ghost"}
+            variant={effectiveView === "pending" ? "default" : "ghost"}
             size="sm"
           >
-            <Link
+            <WebUiLink
               href={overviewHref({ ...common, view: "pending", tag: "" })}
             >
               待入库
-            </Link>
+            </WebUiLink>
           </Button>
         </nav>
 
-        {view === "published" ? (
-          <form action="/" method="get" className="flex flex-1 items-center gap-2">
+        {effectiveView === "published" ? (
+          <form
+            action={appUrl("/")}
+            method="get"
+            className="flex flex-1 items-center gap-2"
+          >
             <input type="hidden" name="view" value="published" />
+            <input type="hidden" name="scope" value={scope} />
             {layout === "list" && (
               <input type="hidden" name="layout" value="list" />
             )}
@@ -182,9 +246,9 @@ export default async function OverviewPage({
             </Button>
             {tagQuery && (
               <Button asChild variant="ghost" size="sm" aria-label="清除搜索">
-                <Link href={overviewHref({ ...common, tag: "" })}>
+                <WebUiLink href={overviewHref({ ...common, tag: "" })}>
                   <X className="size-4" />
-                </Link>
+                </WebUiLink>
               </Button>
             )}
           </form>
@@ -203,9 +267,9 @@ export default async function OverviewPage({
             size="sm"
             aria-label="画廊视图"
           >
-            <Link href={overviewHref({ ...common, layout: "gallery" })}>
+            <WebUiLink href={overviewHref({ ...common, layout: "gallery" })}>
               <LayoutGrid className="size-3.5" />
-            </Link>
+            </WebUiLink>
           </Button>
           <Button
             asChild
@@ -213,9 +277,9 @@ export default async function OverviewPage({
             size="sm"
             aria-label="列表视图"
           >
-            <Link href={overviewHref({ ...common, layout: "list" })}>
+            <WebUiLink href={overviewHref({ ...common, layout: "list" })}>
               <List className="size-3.5" />
-            </Link>
+            </WebUiLink>
           </Button>
         </div>
       </div>
@@ -223,19 +287,25 @@ export default async function OverviewPage({
       <div className="mb-5 flex items-end justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold tracking-tight">
-            {view === "pending" ? "待入库素材" : "已入库素材"}
+            {effectiveView === "pending" ? "待入库素材" : "已入库素材"}
           </h2>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
             {tagQuery
               ? `匹配“${tagQuery}”的素材。`
-              : view === "pending"
+              : effectiveView === "pending"
                 ? "包含等待处理、处理中、失败及待确认素材。"
                 : "已经完成审核并正式入库的素材。"}
           </p>
         </div>
-        <span className="shrink-0 text-sm tabular-nums text-slate-500 dark:text-slate-400">
-          {total} 项
-        </span>
+        <div className="flex shrink-0 flex-col items-end gap-0.5 text-sm tabular-nums text-slate-500 dark:text-slate-400">
+          <span>{total} 项</span>
+          {page.search?.max_score !== null &&
+            page.search?.max_score !== undefined && (
+              <span className="text-xs">
+                最高相关度 {(page.search.max_score * 100).toFixed(0)}%
+              </span>
+            )}
+        </div>
       </div>
 
       {page.items.length === 0 ? (
@@ -247,19 +317,19 @@ export default async function OverviewPage({
             <h2 className="text-xl font-semibold">
               {tagQuery
                 ? "未找到匹配素材"
-                : view === "pending"
+                : effectiveView === "pending"
                   ? "暂无待入库素材"
                   : "暂无已入库素材"}
             </h2>
             <p className="mt-2 max-w-md text-sm text-slate-500 dark:text-slate-400">
               {tagQuery
-                ? `没有素材匹配“${tagQuery}”。`
+                ? page.search?.message ?? `没有素材匹配“${tagQuery}”。`
                 : "新上传素材完成处理后会显示在对应视图。"}
             </p>
             <Button asChild className="mt-6">
-              <Link href={tagQuery ? overviewHref({ ...common, tag: "" }) : uploadHref}>
+              <WebUiLink href={tagQuery ? overviewHref({ ...common, tag: "" }) : uploadHref}>
                 {tagQuery ? "清除搜索条件" : "开始上传"}
-              </Link>
+              </WebUiLink>
             </Button>
           </CardContent>
         </Card>
@@ -278,7 +348,7 @@ export default async function OverviewPage({
             size="sm"
             className={history.length === 0 ? "pointer-events-none opacity-50" : ""}
           >
-            <Link
+            <WebUiLink
               href={overviewHref({
                 ...common,
                 cursor: history.at(-1) ?? null,
@@ -287,7 +357,7 @@ export default async function OverviewPage({
               aria-disabled={history.length === 0}
             >
               <ChevronLeft className="size-4" /> 上一页
-            </Link>
+            </WebUiLink>
           </Button>
           <Button
             asChild
@@ -295,7 +365,7 @@ export default async function OverviewPage({
             size="sm"
             className={!page.has_more ? "pointer-events-none opacity-50" : ""}
           >
-            <Link
+            <WebUiLink
               href={overviewHref({
                 ...common,
                 cursor: page.next_cursor,
@@ -304,7 +374,7 @@ export default async function OverviewPage({
               aria-disabled={!page.has_more}
             >
               下一页 <ChevronRight className="size-4" />
-            </Link>
+            </WebUiLink>
           </Button>
         </nav>
       )}
