@@ -1,9 +1,10 @@
 import crypto from "node:crypto";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/server/db";
-import { assets, jobs, taskItems, tasks } from "@/server/db/schema";
+import { assetEntries, jobs, taskItems, tasks } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
 import { ScenePipelineError } from "@/server/scene/types";
+import { auditLog } from "@/server/observability/audit-log";
 
 export interface PersistedTaskError {
   code: string;
@@ -40,6 +41,48 @@ export function persistedTaskError(error: unknown): PersistedTaskError {
   return {
     code: "internal_error",
     message: error instanceof Error ? error.message : "任务处理失败。",
+  };
+}
+
+interface ItemFailure {
+  code: string | null;
+  message: string | null;
+}
+
+interface AggregateFailure {
+  code: string;
+  message: string | null;
+  codes: string[];
+}
+
+/**
+ * 从一组失败原因中选出"出现次数最多"的错误码作为代表，并保留去重后的完整
+ * 错误码集合，用于把 item/asset 级错误向上回填到任务主表，便于监控与定位。
+ */
+export function dominantFailure(
+  failures: readonly ItemFailure[],
+): AggregateFailure {
+  const counts = new Map<string, { count: number; message: string | null }>();
+  for (const failure of failures) {
+    const code = failure.code ?? "internal_error";
+    const entry = counts.get(code);
+    if (entry) {
+      entry.count += 1;
+      if (!entry.message && failure.message) entry.message = failure.message;
+    } else {
+      counts.set(code, { count: 1, message: failure.message });
+    }
+  }
+  let best: { code: string; count: number; message: string | null } | undefined;
+  for (const [code, value] of counts) {
+    if (!best || value.count > best.count) {
+      best = { code, count: value.count, message: value.message };
+    }
+  }
+  return {
+    code: best?.code ?? "internal_error",
+    message: best?.message ?? null,
+    codes: [...counts.keys()],
   };
 }
 
@@ -106,7 +149,13 @@ export async function refreshUploadTask(taskId: string) {
   const now = new Date();
   await db.transaction(async (tx) => {
     const rows = await tx
-      .select({ status: taskItems.status, phase: taskItems.phase })
+      .select({
+        status: taskItems.status,
+        phase: taskItems.phase,
+        errorCode: taskItems.errorCode,
+        errorMessage: taskItems.errorMessage,
+        errorDetails: taskItems.errorDetails,
+      })
       .from(taskItems)
       .where(eq(taskItems.taskId, taskId));
     if (!rows.length) return;
@@ -118,6 +167,18 @@ export async function refreshUploadTask(taskId: string) {
     const progressPercent = terminal
       ? 100
       : Math.min(99, (finished.length / rows.length) * 100);
+    const failed = finished.filter((item) => item.status === "failed");
+    const failure = dominantFailure(
+      failed.map((item) => ({
+        code: item.errorCode,
+        message: item.errorMessage,
+      })),
+    );
+    const failedAssetIds = failed.flatMap((item) =>
+      Array.isArray(item.errorDetails?.failedAssetIds)
+        ? (item.errorDetails.failedAssetIds as string[])
+        : [],
+    );
     await tx
       .update(tasks)
       .set({
@@ -126,11 +187,37 @@ export async function refreshUploadTask(taskId: string) {
         doneItems,
         failedItems,
         progressPercent,
+        errorCode: terminal && failedItems > 0 ? failure.code : null,
+        errorMessage:
+          terminal && failedItems > 0
+            ? failure.message ?? "部分文件处理失败。"
+            : null,
+        errorDetails:
+          terminal && failedItems > 0
+            ? {
+                codes: failure.codes,
+                failedItems,
+                ...(failedAssetIds.length > 0 ? { failedAssetIds } : {}),
+              }
+            : null,
         finishedAt: terminal ? now : null,
         updatedAt: now,
       })
       .where(eq(tasks.id, taskId));
-    if (terminal) await enqueueTerminalCallback(tx, taskId, now);
+    if (terminal) {
+      if (failedItems > 0) {
+        auditLog("task_terminal_failed", {
+          task_id: taskId,
+          type: "upload",
+          error_code: failure.code,
+          failed_items: failedItems,
+          total_items: rows.length,
+          codes: failure.codes,
+          ...(failedAssetIds.length > 0 ? { failed_asset_ids: failedAssetIds } : {}),
+        }, "warn");
+      }
+      await enqueueTerminalCallback(tx, taskId, now);
+    }
   });
 }
 
@@ -162,30 +249,54 @@ export async function markTaskItemPersisted(taskId: string, itemId: string) {
 /** 在一个 item 的全部图片/切片分析终止后，向上聚合 item 和 task。 */
 export async function refreshTaskForAsset(assetId: string) {
   const [asset] = await db
-    .select({ taskId: assets.taskId, taskItemId: assets.taskItemId })
-    .from(assets)
-    .where(eq(assets.id, assetId))
+    .select({
+      kind: assetEntries.kind,
+      taskId: assetEntries.taskId,
+      taskItemId: assetEntries.taskItemId,
+    })
+    .from(assetEntries)
+    .where(eq(assetEntries.id, assetId))
     .limit(1);
   if (!asset?.taskId || !asset.taskItemId) return;
   const siblings = await db
-    .select({ status: assets.processingStatus })
-    .from(assets)
-    .where(eq(assets.taskItemId, asset.taskItemId));
+    .select({
+      id: assetEntries.id,
+      status: assetEntries.processingStatus,
+      failureCode: assetEntries.failureCode,
+      failureMessage: assetEntries.failureMessage,
+    })
+    .from(assetEntries)
+    .where(
+      and(
+        eq(assetEntries.taskItemId, asset.taskItemId),
+        eq(assetEntries.kind, asset.kind),
+      ),
+    );
   if (!siblings.length) return;
   const terminal = siblings.every(
     ({ status }) => status === "completed" || status === "failed",
   );
   if (!terminal) return;
-  const failed = siblings.some(({ status }) => status === "failed");
+  const failed = siblings.filter(({ status }) => status === "failed");
+  const failure = dominantFailure(
+    failed.map((sibling) => ({
+      code: sibling.failureCode,
+      message: sibling.failureMessage,
+    })),
+  );
   await db
     .update(taskItems)
     .set({
-      status: failed ? "failed" : "done",
+      status: failed.length > 0 ? "failed" : "done",
       phase: "finished",
-      ...(failed
+      ...(failed.length > 0
         ? {
-            errorCode: "model_request_failed",
-            errorMessage: "一个或多个素材切片分析失败，请查看 asset_ids。",
+            errorCode: failure.code,
+            errorMessage: failure.message ?? "一个或多个素材切片分析失败。",
+            errorDetails: {
+              codes: failure.codes,
+              failedAssetIds: failed.map((sibling) => sibling.id),
+            },
           }
         : {}),
       updatedAt: new Date(),
@@ -240,14 +351,6 @@ export async function failMutationTask(taskId: string, error: unknown) {
   });
 }
 
-export async function markAssetsAnalyzing(assetIds: string[]) {
-  if (!assetIds.length) return;
-  await db
-    .update(assets)
-    .set({ processingStatus: "analyzing", updatedAt: new Date() })
-    .where(inArray(assets.id, assetIds));
-}
-
 /**
  * 修复 worker 在“业务事务已提交、任务聚合尚未提交”之间退出留下的状态窗口。
  *
@@ -256,7 +359,7 @@ export async function markAssetsAnalyzing(assetIds: string[]) {
  */
 export async function reconcileActiveTaskLifecycles() {
   const active = await db
-    .select({ id: tasks.id, type: tasks.type })
+    .select({ id: tasks.id, type: tasks.type, userId: tasks.userId })
     .from(tasks)
     .where(eq(tasks.status, "running"));
   let reconciled = 0;
@@ -264,9 +367,14 @@ export async function reconcileActiveTaskLifecycles() {
   for (const task of active) {
     if (task.type === "upload") {
       const rows = await db
-        .select({ id: assets.id })
-        .from(assets)
-        .where(eq(assets.taskId, task.id));
+        .select({ id: assetEntries.id })
+        .from(assetEntries)
+        .where(
+          and(
+            eq(assetEntries.taskId, task.id),
+            eq(assetEntries.kind, task.userId ? "private" : "public"),
+          ),
+        );
       for (const asset of rows) await refreshTaskForAsset(asset.id);
       // 没有 asset 的失败 item 也可在这里向任务主表重新聚合。
       await refreshUploadTask(task.id);
@@ -277,7 +385,7 @@ export async function reconcileActiveTaskLifecycles() {
     if (task.type !== "retry") continue;
     const [analysisJob] = await db
       .select({
-        assetId: jobs.assetId,
+        assetId: sql<string | null>`coalesce(${jobs.privateAssetId}, ${jobs.publicAssetId})`,
         status: jobs.status,
         errorCode: jobs.errorCode,
         errorMessage: jobs.errorMessage,
