@@ -110,28 +110,44 @@ export class ZosObjectStorage implements ObjectStorage {
       throw new Error("ZOS 复制的源对象和目标对象不能相同。");
     }
     const source = await this.headObject(sourceKey);
+    let destinationExisted = true;
+    try {
+      await this.headObject(destinationKey);
+    } catch (error) {
+      const failure = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+      if (failure?.name !== "NotFound" && failure?.name !== "NoSuchKey" &&
+          failure?.$metadata?.httpStatusCode !== 404) throw error;
+      destinationExisted = false;
+    }
     const encodedSource = [this.bucket, ...sourceKey.split("/")]
       .map(encodeURIComponent)
       .join("/");
-    const response = await this.client.send(
-      new CopyObjectCommand({
-        Bucket: this.bucket,
-        Key: destinationKey,
-        CopySource: encodedSource,
-      }),
-    );
-    const copied = await this.headObject(destinationKey);
-    if (copied.sizeBytes !== source.sizeBytes) {
-      throw new Error(
-        `ZOS 复制后大小不一致：源对象 ${source.sizeBytes} 字节，目标对象 ${copied.sizeBytes} 字节。`,
+    try {
+      const response = await this.client.send(
+        new CopyObjectCommand({
+          Bucket: this.bucket,
+          Key: destinationKey,
+          CopySource: encodedSource,
+        }),
       );
+      const copied = await this.headObject(destinationKey);
+      if (copied.sizeBytes !== source.sizeBytes) {
+        throw new Error(
+          `ZOS 复制后大小不一致：源对象 ${source.sizeBytes} 字节，目标对象 ${copied.sizeBytes} 字节。`,
+        );
+      }
+      return {
+        key: destinationKey,
+        sizeBytes: copied.sizeBytes,
+        etag: response.CopyObjectResult?.ETag?.replaceAll('"', "") ?? copied.etag,
+        url: publicObjectUrl(this.publicBaseUrl, destinationKey),
+      };
+    } catch (error) {
+      // A lost response may hide a successful copy. Only compensate new keys;
+      // deleting an existing destination would destroy another stored object.
+      if (!destinationExisted) await this.deleteObject(destinationKey).catch(() => undefined);
+      throw error;
     }
-    return {
-      key: destinationKey,
-      sizeBytes: copied.sizeBytes,
-      etag: response.CopyObjectResult?.ETag?.replaceAll('"', "") ?? copied.etag,
-      url: publicObjectUrl(this.publicBaseUrl, destinationKey),
-    };
   }
 
   async headObject(key: string): Promise<ObjectMetadata> {
