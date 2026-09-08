@@ -290,15 +290,17 @@ mysqlPipeline("API v1 完整媒体管线", () => {
 
   afterEach(async () => {
     // 断言失败时仍回收数据库和临时媒体，避免测试夹具泄漏到后续 WebUI。
-    if (database?.pool) await truncateIntegrationTables(database.pool);
-    if (process.env.MEDIA_ROOT) {
-      await fs.rm(process.env.MEDIA_ROOT, { recursive: true, force: true });
-    }
-    if (process.env.SCENE_DETECT_WORKSPACE_ROOT) {
-      await fs.rm(process.env.SCENE_DETECT_WORKSPACE_ROOT, {
-        recursive: true,
-        force: true,
-      });
+    try {
+      if (database?.pool) await truncateIntegrationTables(database.pool);
+    } finally {
+      await Promise.all([
+        process.env.MEDIA_ROOT
+          ? fs.rm(process.env.MEDIA_ROOT, { recursive: true, force: true })
+          : Promise.resolve(),
+        process.env.SCENE_DETECT_WORKSPACE_ROOT
+          ? fs.rm(process.env.SCENE_DETECT_WORKSPACE_ROOT, { recursive: true, force: true })
+          : Promise.resolve(),
+      ]);
     }
   });
 
@@ -306,9 +308,10 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     try {
       if (database?.pool) await truncateIntegrationTables(database.pool);
     } finally {
-      if (database?.pool) await database.pool.end();
-      if (temporaryRoot) {
-        await fs.rm(temporaryRoot, { recursive: true, force: true });
+      try {
+        if (database?.pool) await database.pool.end();
+      } finally {
+        if (temporaryRoot) await fs.rm(temporaryRoot, { recursive: true, force: true });
       }
     }
   });
