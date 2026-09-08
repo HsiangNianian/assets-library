@@ -44,6 +44,12 @@ export function scopeForRepository(scope: UserScope): AssetScope {
   }
 }
 
+export function scopeForAssetQuery(
+  input: Pick<AssetQuery, "filter" | "keywords">,
+): AssetScope {
+  return scopeForRepository(input.filter.user_scope);
+}
+
 function encodeCursor(page: number) {
   return Buffer.from(JSON.stringify({ page }), "utf8").toString("base64url");
 }
@@ -155,13 +161,27 @@ export class AssetService {
       ...(asset.searchScore === undefined
         ? {}
         : { search_score: asset.searchScore }),
+      ...(asset.keywordScore === undefined
+        ? {}
+        : { keyword_score: asset.keywordScore }),
       ...(asset.semanticScore === undefined
         ? {}
         : { semantic_score: asset.semanticScore }),
+      ...(asset.matchType === undefined
+        ? {}
+        : { match_type: asset.matchType }),
+      ...(asset.matchedTerms === undefined
+        ? {}
+        : { matched_terms: asset.matchedTerms }),
+      ...(asset.matchedCategories === undefined
+        ? {}
+        : { matched_categories: asset.matchedCategories }),
     } satisfies ApiV1AssetSummary;
   }
 
-  async queryAssets(input: AssetQuery): Promise<AssetQueryResponse> {
+  async queryAssets(
+    input: AssetQuery,
+  ): Promise<AssetQueryResponse> {
     if (input.query && input.cursor) {
       throw new ApiV1Error(
         "invalid_request",
@@ -170,7 +190,7 @@ export class AssetService {
       );
     }
     const pageNumber = input.query ? 1 : decodeCursor(input.cursor);
-    const scope = scopeForRepository(input.filter.user_scope);
+    const scope = scopeForAssetQuery(input);
     const result = await this.dependencies.repository.queryAssetsPage({
       ...scope,
       page: pageNumber,
@@ -194,6 +214,7 @@ export class AssetService {
       tag_statistics: input.include_tag_statistics
         ? (result.tagStatistics ?? null)
         : null,
+      search: result.search ?? null,
     };
   }
 
@@ -208,7 +229,6 @@ export class AssetService {
       original_filename: detail.originalFilename,
       mime_type: detail.mimeType,
       size_bytes: detail.sizeBytes,
-      auto_publish: detail.directPublish,
       segment_start_seconds:
         detail.segmentStartMs === null ? null : detail.segmentStartMs / 1_000,
       segment_end_seconds:
