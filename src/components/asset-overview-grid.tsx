@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
@@ -14,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { MediaPreview } from "@/components/media-preview";
+import { WebUiLink } from "@/components/webui-link";
 import { appUrl } from "@/lib/paths";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -33,10 +33,9 @@ const statusLabel: Record<ApiTaskStatus, string> = {
 };
 
 function detailHref(asset: ApiV1AssetSummary) {
-  const query = asset.user_id
-    ? `?user_id=${encodeURIComponent(asset.user_id)}`
-    : "";
-  return appUrl(`/assets/${asset.asset_id}${query}`);
+  const query = new URLSearchParams({ scope: asset.user_id ? "private" : "public" });
+  if (asset.user_id) query.set("user_id", asset.user_id);
+  return appUrl(`/assets/${asset.asset_id}?${query.toString()}`);
 }
 
 export function AssetOverviewGrid({
@@ -204,10 +203,14 @@ function Diagnostics({ asset }: { asset: ApiV1AssetSummary }) {
   if (asset.search_score === undefined) return null;
   return (
     <div className="flex flex-wrap gap-2 border-t border-black/[0.06] pt-3 text-xs text-slate-500 dark:border-white/[0.10] dark:text-slate-400">
-      <span>排序分：{asset.search_score.toFixed(1)}</span>
+      <span>相关度：{asset.search_score.toFixed(3)}</span>
+      {asset.keyword_score !== undefined && (
+        <span>关键词分：{asset.keyword_score.toFixed(3)}</span>
+      )}
       {asset.semantic_score !== undefined && (
         <span>语义分：{asset.semantic_score.toFixed(3)}</span>
       )}
+      {asset.match_type !== undefined && <span>匹配：{asset.match_type}</span>}
     </div>
   );
 }
@@ -251,12 +254,12 @@ function GalleryCard({
       </button>
       <CardContent className="space-y-3 p-4 pt-4">
         <div className="flex items-center justify-between gap-3">
-          <Link
+          <WebUiLink
             href={detailHref(asset)}
             className="truncate font-semibold tracking-tight hover:text-[#0071e3]"
           >
             {asset.name}
-          </Link>
+          </WebUiLink>
           <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">
             {asset.review_status === "published" ? "已入库" : "待审核"}
           </span>
@@ -307,12 +310,12 @@ function ListRow({
       </button>
       <div className="min-w-0 flex-1 space-y-2">
         <div className="flex items-center gap-3">
-          <Link
+          <WebUiLink
             href={detailHref(asset)}
             className="truncate font-semibold tracking-tight hover:text-[#0071e3]"
           >
             {asset.name}
-          </Link>
+          </WebUiLink>
           <span className="hidden shrink-0 text-xs text-slate-400 dark:text-slate-500 sm:inline">
             {asset.media_type === "image" ? "图片" : "视频"}
           </span>
@@ -385,12 +388,12 @@ function PreviewDialog({
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Link
+            <WebUiLink
               href={detailHref(asset)}
               className="rounded-full bg-white/15 px-3 py-2 text-sm hover:bg-white/25"
             >
               查看详情
-            </Link>
+            </WebUiLink>
             <Button
               variant="ghost"
               size="sm"
