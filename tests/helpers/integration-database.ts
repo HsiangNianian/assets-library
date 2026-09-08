@@ -72,11 +72,15 @@ export function assertDedicatedIntegrationDatabase(
       "TEST_DATABASE_URL 必须指向以 _test 结尾的独立测试库。",
     );
   }
-  if (
-    application.databaseName === testTarget.database ||
-    (application.databaseUrl &&
-      sameDatabase(testTarget, databaseIdentity(application.databaseUrl)))
-  ) {
+  const applicationTarget = application.databaseUrl
+    ? databaseIdentity(application.databaseUrl)
+    : null;
+  if (applicationTarget && application.databaseName) {
+    applicationTarget.database = application.databaseName;
+  }
+  if (applicationTarget
+    ? sameDatabase(testTarget, applicationTarget)
+    : application.databaseName === testTarget.database) {
     throw new Error("TEST_DATABASE_URL 不得与 WebUI 的 DATABASE_URL 指向同一数据库。");
   }
   return testTarget;
@@ -91,7 +95,12 @@ export function bindIntegrationDatabaseEnvironment(
   env: DatabaseEnvironment = process.env,
 ) {
   const appMode = env.APP_MODE?.trim() === "prd" ? "prd" : "dev";
+  const applicationUrl = env.DATABASE_URL ? new URL(env.DATABASE_URL) : null;
+  if (applicationUrl && appMode === "prd" && env.PRD_INTERNAL_SERVICE_HOST?.trim()) {
+    applicationUrl.hostname = env.PRD_INTERNAL_SERVICE_HOST.trim();
+  }
   const testTarget = assertDedicatedIntegrationDatabase(testDatabaseUrl, {
+    databaseUrl: applicationUrl?.toString(),
     databaseName: configuredWebUiDatabaseName(env),
   });
 
