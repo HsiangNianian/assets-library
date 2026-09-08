@@ -18,12 +18,15 @@ import type { MySqlRawQueryResult } from "drizzle-orm/mysql2";
 import { alias } from "drizzle-orm/mysql-core";
 import { db } from "@/server/db";
 import {
-  analysisResults,
-  assets,
-  assetTagRejections,
-  assetTags,
+  analysisResultEntries as analysisResults,
+  assetEntries as assets,
+  assetTagEntries as assetTags,
+  assetTagRejections as assetTagRejectionRecords,
+  assetTags as assetTagRecords,
   jobs,
   mediaObjects,
+  privateAssets,
+  publicAssets,
   tags,
   taskItems,
   tasks,
@@ -34,13 +37,28 @@ import {
   canClaimAnalyzeTask,
   DEFAULT_ANALYZE_TASK_SOFT_LIMIT,
 } from "@/server/jobs/scheduling";
-import { searchAnalysis } from "@/server/search/chroma";
+import { searchAnalysis, semanticSearchEnabled } from "@/server/search/chroma";
+import {
+  DEFAULT_BUSINESS_ALIASES,
+  DEFAULT_RELEVANCE_THRESHOLDS,
+  hybridRelevanceScore,
+  isBroadAiQuery,
+  normalizeSearchText,
+  normalizeSemanticText,
+  scoreKeywordRelevance,
+  selectBroadQueryRecallTier,
+  tokenizeKeywordQuery,
+  type KeywordRelevance,
+  type LexicalMatchType,
+  type SearchableTag,
+} from "@/server/search/relevance";
 import { apiV1Path } from "@/lib/paths";
 import {
   analysisResultSchema,
   type AssetDetail,
   type AssetEdit,
   type AssetPage,
+  type AssetSearchMeta,
   type AssetSummary,
   type AssetTag,
   type DescriptionSearch,
@@ -51,10 +69,30 @@ import {
   type TagStatistics,
 } from "@/shared/contracts";
 
-const strongSemanticSimilarity = 0.55;
-
 function affectedRows(result: MySqlRawQueryResult) {
   return result[0].affectedRows;
+}
+
+export type AssetKind = "public" | "private";
+export interface AssetRef {
+  kind: AssetKind;
+  id: string;
+}
+
+export function assetRef(assetId: string, userId?: string | null): AssetRef {
+  return { kind: userId?.trim() ? "private" : "public", id: assetId };
+}
+
+export function jobTarget(ref: AssetRef) {
+  return ref.kind === "private"
+    ? { privateAssetId: ref.id }
+    : { publicAssetId: ref.id };
+}
+
+export function associationTarget(ref: AssetRef) {
+  return ref.kind === "private"
+    ? { privateAssetId: ref.id, publicAssetId: null }
+    : { publicAssetId: ref.id, privateAssetId: null };
 }
 
 export interface TaskItemManifest {
@@ -91,6 +129,7 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
   const taskId = input.id ?? crypto.randomUUID();
   const now = new Date();
   const userId = input.userId?.trim() || null;
+  const target = assetRef(input.assetId, userId);
   const phase =
     input.type === "delete"
       ? "deleting"
@@ -100,6 +139,27 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
           ? "updating"
           : "retrying";
   await db.transaction(async (tx) => {
+    if (input.type === "publish") {
+      const [asset] = target.kind === "private"
+        ? await tx
+            .select({ id: privateAssets.id })
+            .from(privateAssets)
+            .where(
+              and(
+                eq(privateAssets.id, input.assetId),
+                eq(privateAssets.userId, userId!),
+              ),
+            )
+            .limit(1)
+        : await tx
+            .select({ id: publicAssets.id })
+            .from(publicAssets)
+            .where(eq(publicAssets.id, input.assetId))
+            .limit(1);
+      if (!asset) {
+        throw new AppError("invalid_request", "素材不存在。", 404);
+      }
+    }
     if (userId) {
       await tx
         .insert(users)
@@ -129,7 +189,7 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
     await tx.insert(jobs).values({
       id: crypto.randomUUID(),
       taskId,
-      assetId: input.assetId,
+      ...jobTarget(target),
       type: input.type,
       phase,
       payload: input.payload ?? null,
@@ -209,14 +269,22 @@ export async function getTaskWithItems(taskId: string) {
 /** 查询任务逐文件对应的素材 ID，供 API 展示层组装任务快照。 */
 export async function listTaskItemAssetIds(taskId: string) {
   return db
-    .select({ id: assets.id, taskItemId: assets.taskItemId })
+    .select({
+      id: assets.id,
+      taskItemId: assets.taskItemId,
+      kind: assets.kind,
+      segmentIndex: assets.segmentIndex,
+    })
     .from(assets)
-    .where(eq(assets.taskId, taskId));
+    .where(eq(assets.taskId, taskId))
+    .orderBy(asc(assets.segmentIndex), asc(assets.id));
 }
 
 export interface ListUserTaskIdsOptions {
   statuses?: Array<"queued" | "running" | "done" | "failed">;
-  types?: Array<"upload" | "delete" | "publish" | "update" | "retry">;
+  types?: Array<
+    "upload" | "delete" | "publish" | "update" | "retry" | "match"
+  >;
   before?: { createdAt: Date; id: string };
   limit: number;
 }
@@ -567,41 +635,47 @@ export interface CreateAssetInput {
   mimeType: string;
   mediaType: "image" | "video";
   sizeBytes: number;
-  directPublish: boolean;
   enqueueAnalysis?: boolean;
 }
 
 /** 创建素材及分析作业。父视频不得调用此函数，只为图片或已校验的视频切片建档。 */
 export async function createAsset(input: CreateAssetInput) {
   const now = new Date();
+  const ref = assetRef(input.assetId, input.userId);
+  const values = {
+    id: input.assetId,
+    taskId: input.taskId ?? null,
+    taskItemId: input.taskItemId ?? null,
+    taskItemSegmentId: input.taskItemSegmentId ?? null,
+    videoSourceId: input.videoSourceId ?? null,
+    mediaObjectId: input.mediaObjectId ?? null,
+    segmentIndex: input.segmentIndex ?? null,
+    segmentStartMs: input.segmentStartMs ?? null,
+    segmentEndMs: input.segmentEndMs ?? null,
+    name: input.name,
+    description: "",
+    mediaType: input.mediaType,
+    originalFilename: input.originalFilename,
+    originalPath: input.originalPath,
+    mimeType: input.mimeType,
+    sizeBytes: input.sizeBytes,
+    createdAt: now,
+    updatedAt: now,
+  };
   await db.transaction(async (tx) => {
-    await tx.insert(assets).values({
-      id: input.assetId,
-      taskId: input.taskId ?? null,
-      taskItemId: input.taskItemId ?? null,
-      taskItemSegmentId: input.taskItemSegmentId ?? null,
-      videoSourceId: input.videoSourceId ?? null,
-      mediaObjectId: input.mediaObjectId ?? null,
-      segmentIndex: input.segmentIndex ?? null,
-      segmentStartMs: input.segmentStartMs ?? null,
-      segmentEndMs: input.segmentEndMs ?? null,
-      userId: input.userId?.trim() || null,
-      name: input.name,
-      description: "",
-      mediaType: input.mediaType,
-      originalFilename: input.originalFilename,
-      originalPath: input.originalPath,
-      mimeType: input.mimeType,
-      sizeBytes: input.sizeBytes,
-      directPublish: input.directPublish,
-      createdAt: now,
-      updatedAt: now,
-    });
+    if (ref.kind === "private") {
+      await tx.insert(privateAssets).values({
+        ...values,
+        userId: input.userId!.trim(),
+      });
+    } else {
+      await tx.insert(publicAssets).values(values);
+    }
     if (input.enqueueAnalysis !== false) {
       await tx.insert(jobs).values({
         id: crypto.randomUUID(),
         taskId: input.taskId ?? null,
-        assetId: input.assetId,
+        ...jobTarget(ref),
         type: "analyze",
         availableAt: now,
         createdAt: now,
@@ -696,6 +770,7 @@ export interface QueryAssetsOptions extends AssetScope {
 
 export interface AssetQueryPage extends AssetPage {
   tagStatistics?: TagStatistics;
+  search?: AssetSearchMeta | null;
 }
 
 export interface UserStorageItem {
@@ -744,20 +819,32 @@ const thumbnailMediaObjects = alias(
 function scopeCondition(scope: AssetScope): SQL | undefined {
   if (scope.includeAllUsers) return undefined;
   if (scope.excludeUserId) {
-    return or(isNull(assets.userId), ne(assets.userId, scope.excludeUserId));
+    return and(
+      eq(assets.kind, "public"),
+      or(
+        isNull(assets.uploaderUserId),
+        ne(assets.uploaderUserId, scope.excludeUserId),
+      ),
+    );
   }
   const userId = scope.userId?.trim();
-  if (!userId) return isNull(assets.userId);
-  // 包含用户自己的素材 + 公共素材（user_id 为 NULL）
-  return or(eq(assets.userId, userId), isNull(assets.userId));
+  return userId
+    ? and(eq(assets.kind, "private"), eq(assets.userId, userId))
+    : eq(assets.kind, "public");
 }
 
-function rowMatchesScope(userId: string | null, scope: AssetScope) {
+function rowMatchesScope(
+  row: Pick<typeof assets.$inferSelect, "kind" | "userId" | "uploaderUserId">,
+  scope: AssetScope,
+) {
   if (scope.includeAllUsers) return true;
   if (scope.excludeUserId) {
-    return userId === null || userId !== scope.excludeUserId;
+    return row.kind === "public" && row.uploaderUserId !== scope.excludeUserId;
   }
-  return userId === (scope.userId?.trim() || null);
+  const userId = scope.userId?.trim();
+  return userId
+    ? row.kind === "private" && row.userId === userId
+    : row.kind === "public";
 }
 
 function normalizedUsageUserId(userId: string) {
@@ -770,9 +857,10 @@ function normalizedUsageUserId(userId: string) {
 
 function userStorageConditions(userId: string) {
   return and(
+    eq(assets.kind, "private"),
     // MySQL 默认排序规则可能不区分大小写；BINARY 保证 user_id 真正精确匹配。
     sql<boolean>`BINARY ${assets.userId} = BINARY ${userId}`,
-    ne(assets.reviewStatus, "deleted"),
+    isNull(assets.deletedAt),
   );
 }
 
@@ -802,7 +890,7 @@ function userStorageItemSelection() {
 /**
  * 汇总单个用户当前持有的素材空间用量。
  *
- * 计费边界严格落在非 deleted 的 assets 行：图片计入主媒体对象，视频计入分镜
+ * 计费边界严格落在未删除的私有素材行：图片计入主媒体对象，视频计入分镜
  * 素材自身的媒体对象及其持久化首帧。完整父视频属于 video_sources，不在本查询
  * 的连接边界内，因此不会重复计费。
  */
@@ -964,8 +1052,9 @@ export async function listRegisteredUsers(): Promise<RegisteredUserUsage[]> {
     .leftJoin(
       assets,
       and(
+        eq(assets.kind, "private"),
         eq(assets.userId, users.userId),
-        ne(assets.reviewStatus, "deleted"),
+        isNull(assets.deletedAt),
       ),
     )
     .groupBy(
@@ -1019,28 +1108,6 @@ async function assetIdsMatchingExactTags(filters: ExactTagFilter[]) {
     }),
   );
   return intersectAssetIdSets(matches);
-}
-
-/** keywords 延续现有标签模糊匹配规则，并以 AND 方式收窄候选集。 */
-async function assetIdsMatchingKeywords(keywords: string[]) {
-  const normalized = [
-    ...new Set(
-      keywords.map((keyword) => normalizeTag(keyword)).filter(Boolean),
-    ),
-  ];
-  if (!normalized.length) {
-    return { assetIds: undefined, scores: undefined };
-  }
-  const matches = await Promise.all(normalized.map(matchingAssetScores));
-  const assetIds = intersectAssetIdSets(matches.map((match) => new Set(match.keys())));
-  const scores = new Map<string, number>();
-  for (const assetId of assetIds ?? []) {
-    scores.set(
-      assetId,
-      matches.reduce((sum, match) => sum + (match.get(assetId) ?? 0), 0),
-    );
-  }
-  return { assetIds, scores };
 }
 
 function processingCondition(statuses: ProcessingStatus[]) {
@@ -1126,52 +1193,109 @@ async function tagStatisticsForAssetIds(assetIds: string[]): Promise<TagStatisti
   };
 }
 
-function tagMatchScore(tag: string, query: string) {
-  if (tag === query) return 1_000;
-  if (requiresExactTagMatch(query)) return 0;
-  if (tag.startsWith(query)) return 800 - (tag.length - query.length);
-  if (tag.includes(query)) return 600 - (tag.length - query.length);
-  if (query.length < 2) return 0;
-  const maximumDistance =
-    query.length <= 4 ? 1 : Math.min(3, Math.floor(query.length / 3));
-  const distance = levenshteinDistance(tag, query);
-  return distance <= maximumDistance ? 300 - distance * 50 : 0;
+interface RankedAssetMatch {
+  finalScore: number;
+  keywordScore?: number;
+  semanticScore?: number;
+  matchType: LexicalMatchType | "semantic" | "hybrid";
+  matchedTerms: string[];
+  matchedCategories: string[];
 }
 
-function requiresExactTagMatch(query: string) {
-  return /[\p{N}\p{Script=Latin}]$/u.test(query);
+interface KeywordMatches {
+  assetIds?: Set<string>;
+  scores?: Map<string, RankedAssetMatch>;
+  threshold?: number;
+  maxScore?: number | null;
+  reason?: "matched" | "no_candidates" | "fallback_exhausted";
+  broadQuery?: boolean;
+  semanticText?: string;
 }
 
-function levenshteinDistance(left: string, right: string) {
-  const leftCharacters = Array.from(left);
-  const rightCharacters = Array.from(right);
-  let previous = Array.from(
-    { length: rightCharacters.length + 1 },
-    (_, index) => index,
+function searchMetadata(
+  mode: AssetSearchMeta["mode"],
+  threshold: number,
+  maxScore: number | null,
+  reason: AssetSearchMeta["reason"],
+): AssetSearchMeta {
+  const formattedMaximum = maxScore === null ? null : maxScore.toFixed(3);
+  const message =
+    reason === "matched"
+      ? null
+      : reason === "semantic_unavailable"
+        ? "语义搜索暂不可用，请稍后重试。"
+        : reason === "below_threshold"
+          ? `找到候选素材，但最高匹配分为 ${formattedMaximum ?? "0.000"}，未超过展示阈值 ${threshold.toFixed(3)}。`
+          : reason === "fallback_exhausted"
+            ? "强匹配和错别字兜底都没有找到超过展示阈值的素材。"
+            : "没有召回任何候选素材。";
+  return { mode, threshold, max_score: maxScore, reason, message };
+}
+
+function emptyAssetQueryPage(
+  pageSize: number,
+  includeTagStatistics: boolean,
+  search: AssetSearchMeta | null,
+) {
+  return {
+    items: [],
+    page: 1,
+    pageSize,
+    total: 0,
+    totalPages: 1,
+    ...(includeTagStatistics ? { tagStatistics: emptyTagStatistics() } : {}),
+    search,
+  } satisfies AssetQueryPage;
+}
+
+function rankedKeywordMatch(
+  relevance: KeywordRelevance,
+): RankedAssetMatch {
+  const evidence = [...relevance.evidence].sort(
+    (left, right) => right.score - left.score,
   );
-  for (let leftIndex = 1; leftIndex <= leftCharacters.length; leftIndex += 1) {
-    const current = [leftIndex];
-    for (
-      let rightIndex = 1;
-      rightIndex <= rightCharacters.length;
-      rightIndex += 1
-    ) {
-      current[rightIndex] = Math.min(
-        current[rightIndex - 1]! + 1,
-        previous[rightIndex]! + 1,
-        previous[rightIndex - 1]! +
-          (leftCharacters[leftIndex - 1] === rightCharacters[rightIndex - 1]
-            ? 0
-            : 1),
-      );
-    }
-    previous = current;
-  }
-  return previous[rightCharacters.length]!;
+  return {
+    finalScore: relevance.score,
+    keywordScore: relevance.score,
+    matchType: evidence.some((item) => item.matchType === "typo")
+      ? "typo"
+      : (evidence[0]?.matchType ?? "exact"),
+    matchedTerms: relevance.matchedTokens,
+    matchedCategories: [
+      ...new Set(evidence.map((item) => item.category)),
+    ],
+  };
 }
 
-async function matchingAssetScores(tagQuery: string) {
-  const scores = new Map<string, number>();
+function qualifiedMatches(
+  scores: Map<string, RankedAssetMatch>,
+  threshold: number,
+) {
+  return new Map(
+    [...scores].filter(([, match]) => match.finalScore > threshold),
+  );
+}
+
+async function assetIdsMatchingKeywords(
+  keywords: string[],
+  baseConditions: readonly SQL[] = [],
+): Promise<KeywordMatches> {
+  /*
+  根据baseConditions 来初步筛选素材，
+  */
+  // 对关键字进行分词和去重
+  const tokens = [
+    ...new Set(keywords.flatMap((keyword) => tokenizeKeywordQuery(keyword))),
+  ];
+  if (!tokens.length) {
+    return { assetIds: undefined, scores: undefined };
+  }
+  // 从数据库读取候选的素材标签
+  /*
+  - assetId：标签所属的素材 ID；
+  - category：标签类别，如场景、风格、对象等；
+  - normalizedValue：标准化后的标签值，用于匹配。
+  */
   const tagRows = await db
     .select({
       assetId: assetTags.assetId,
