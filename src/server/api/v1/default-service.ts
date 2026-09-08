@@ -30,7 +30,7 @@ export interface ApiV1DomainServices {
     | "updateAsset"
   >;
   media: Pick<MediaService, "getMedia" | "getThumbnail">;
-  tasks: Pick<TaskService, "getTask">;
+  tasks: Pick<TaskService, "getTask" | "listTasks">;
   uploads: Pick<
     UploadService,
     "createUploadTask" | "receiveUploadItem" | "sealUploadTask"
@@ -46,6 +46,7 @@ export function createApiV1DomainServices(): ApiV1DomainServices {
   const tasks = new TaskService({
     getTaskWithItems: assetRepository.getTaskWithItems,
     listTaskItemAssetIds: assetRepository.listTaskItemAssetIds,
+    listUserTaskIds: assetRepository.listUserTaskIds,
   });
   return {
     tasks,
@@ -111,6 +112,10 @@ export class DefaultApiV1Service implements ApiV1Service {
     return this.services.tasks.getTask(taskId, expectedUserId);
   }
 
+  listTasks(userId: string, input: Parameters<TaskService["listTasks"]>[1]) {
+    return this.services.tasks.listTasks(userId, input);
+  }
+
   queryAssets(input: AssetQuery) {
     return this.services.assets.queryAssets(input);
   }
@@ -122,7 +127,6 @@ export class DefaultApiV1Service implements ApiV1Service {
   listUserMedia(userId: string, input: UserMediaListQuery, origin: string) {
     return this.services.users.listUserMedia(userId, input, origin);
   }
-
   getAsset(assetId: string, scope: UserScope) {
     return this.services.assets.getAsset(assetId, scope);
   }
