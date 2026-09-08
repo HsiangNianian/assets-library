@@ -121,14 +121,17 @@ export interface AssetSummary {
   mediaUrl: string;
   createdAt: string;
   searchScore?: number;
+  keywordScore?: number;
   semanticScore?: number;
+  matchType?: "exact" | "alias" | "prefix" | "contains" | "typo" | "semantic" | "hybrid";
+  matchedTerms?: string[];
+  matchedCategories?: string[];
 }
 
 export interface AssetDetail extends AssetSummary {
   originalFilename: string;
   mimeType: string;
   sizeBytes: number;
-  directPublish: boolean;
   failureCode: FailureCode | null;
   failureMessage: string | null;
   analysis: AnalysisResult | null;
@@ -163,6 +166,7 @@ export const apiTaskTypeSchema = z.enum([
   "publish",
   "update",
   "retry",
+  "match",
 ]);
 export type ApiTaskType = z.infer<typeof apiTaskTypeSchema>;
 
@@ -177,6 +181,7 @@ export const apiTaskPhaseSchema = z.enum([
   "updating",
   "retrying",
   "deleting",
+  "matching",
   "notifying",
   "finished",
 ]);
@@ -253,6 +258,116 @@ export const callbackUrlSchema = z
   .nullable()
   .default(null);
 
+const compatibilityAsrWordSchema = z
+  .object({
+    text: z.string(),
+    begin_time: z.number().int().nonnegative(),
+    end_time: z.number().int().nonnegative(),
+    punctuation: z.string().optional(),
+  })
+  .refine((word) => word.end_time >= word.begin_time, {
+    message: "ASR 词语的 end_time 不得早于 begin_time。",
+  })
+  .passthrough();
+
+const compatibilityAsrSentenceSchema = z
+  .object({
+    text: z.string(),
+    words: z.array(compatibilityAsrWordSchema).min(1).max(10_000),
+    begin_time: z.number().int().nonnegative().optional(),
+    end_time: z.number().int().nonnegative().optional(),
+    sentence_id: z.number().int().nonnegative().optional(),
+  })
+  .passthrough();
+
+const compatibilityLlmSegmentSchema = z
+  .object({
+    segment_id: z.number().int().positive(),
+    text: z.string().trim().min(1).max(10_000),
+    high_light_word: z.string().max(1_000).optional(),
+    keyword: z.string().max(1_000).optional(),
+    level: z.number().int().nonnegative(),
+    group_id: z.tuple([z.number(), z.number()]).optional(),
+    start_time: z.number().optional(),
+    end_time: z.number().optional(),
+  })
+  .passthrough();
+
+const compatibilityLlmPayloadSchema = z
+  .object({
+    segments: z.array(compatibilityLlmSegmentSchema).min(1).max(500),
+  })
+  .passthrough();
+
+const compatibilityLlmSchema = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}, compatibilityLlmPayloadSchema);
+
+const compatibilityAssetUrlSchema = z.union([
+  z.string().url(),
+  z
+    .object({
+      file_url: z.string().url(),
+      type: z.string(),
+    })
+    .passthrough(),
+]);
+
+/** 旧剪辑业务的分段匹配请求；兼容 ASR 对齐和 LLM 已带时间轴两种格式。 */
+export const compatibilityMatchRequestSchema = z
+  .object({
+    asr: z
+      .object({
+        transcripts: z
+          .array(
+            z
+              .object({
+                sentences: z
+                  .array(compatibilityAsrSentenceSchema)
+                  .min(1)
+                  .max(10_000),
+              })
+              .passthrough(),
+          )
+          .min(1)
+          .max(20)
+          .optional(),
+      })
+      .passthrough(),
+    llm: compatibilityLlmSchema,
+    text: z.string().max(1_000_000).optional(),
+    asset_url_list: z
+      .array(compatibilityAssetUrlSchema)
+      .max(10_000)
+      .default([]),
+    is_random: z.boolean().default(true),
+    semantic_threshold: z.number().min(0).max(1).default(0.3),
+    callback_url: z
+      .string()
+      .url()
+      .max(2_048)
+      .refine((value) => ["http:", "https:"].includes(new URL(value).protocol), {
+        message: "callback_url 仅支持 HTTP 或 HTTPS。",
+      }),
+  })
+  .passthrough();
+export type CompatibilityMatchRequest = z.infer<
+  typeof compatibilityMatchRequestSchema
+>;
+
+export const compatibilityMatchAcceptedSchema = z.object({
+  taskId: z.string().uuid(),
+  status: z.literal("processing"),
+});
+export type CompatibilityMatchAccepted = z.infer<
+  typeof compatibilityMatchAcceptedSchema
+>;
+
 export const MAX_UPLOAD_TASK_ITEMS = 100;
 export const MAX_UPLOAD_TASK_BYTES = 2 * 1024 * 1024 * 1024;
 
@@ -269,7 +384,6 @@ export const createUploadTaskSchema = z
   .object({
     user_id: nullableUserIdSchema,
     callback_url: callbackUrlSchema,
-    auto_publish: z.boolean().default(false),
     items: z
       .array(uploadManifestItemSchema)
       .min(1)
@@ -302,7 +416,8 @@ export const uploadTaskItemSchema = z.object({
   received_bytes: z.number().int().nonnegative(),
   total_bytes: z.number().int().nonnegative(),
   progress_percent: z.number().min(0).max(100),
-  asset_ids: z.array(z.string().uuid()),
+  private_asset_ids: z.array(z.string().uuid()),
+  public_asset_ids: z.array(z.string().uuid()),
   error: taskErrorSchema,
 });
 export type UploadTaskItem = z.infer<typeof uploadTaskItemSchema>;
@@ -392,10 +507,37 @@ export const apiV1AssetSummarySchema = z.object({
   media_url: z.string(),
   created_at: apiDateTimeSchema,
   updated_at: apiDateTimeSchema,
-  search_score: z.number().optional(),
+  search_score: z.number().min(0).max(1).optional(),
+  keyword_score: z.number().min(0).max(1).optional(),
   semantic_score: z.number().min(0).max(1).optional(),
+  match_type: z
+    .enum(["exact", "alias", "prefix", "contains", "typo", "semantic", "hybrid"])
+    .optional(),
+  matched_terms: z.array(z.string()).optional(),
+  matched_categories: z.array(z.string()).optional(),
 });
 export type ApiV1AssetSummary = z.infer<typeof apiV1AssetSummarySchema>;
+
+export const assetSearchModeSchema = z.enum(["keyword", "semantic", "hybrid"]);
+export type AssetSearchMode = z.infer<typeof assetSearchModeSchema>;
+
+export const assetSearchReasonSchema = z.enum([
+  "matched",
+  "no_candidates",
+  "below_threshold",
+  "semantic_unavailable",
+  "fallback_exhausted",
+]);
+export type AssetSearchReason = z.infer<typeof assetSearchReasonSchema>;
+
+export const assetSearchMetaSchema = z.object({
+  mode: assetSearchModeSchema,
+  threshold: z.number().min(0).max(1),
+  max_score: z.number().min(0).max(1).nullable(),
+  reason: assetSearchReasonSchema,
+  message: z.string().nullable(),
+});
+export type AssetSearchMeta = z.infer<typeof assetSearchMetaSchema>;
 
 export const tagStatisticSchema = z.object({
   category: z.string(),
@@ -426,8 +568,26 @@ export const assetQueryResponseSchema = z.object({
   next_cursor: z.string().nullable(),
   has_more: z.boolean(),
   tag_statistics: tagStatisticsSchema.nullable(),
+  search: assetSearchMetaSchema.nullable(),
 });
 export type AssetQueryResponse = z.infer<typeof assetQueryResponseSchema>;
+
+/** 受页面锁保护的管理界面用户目录。 */
+export const userDirectoryEntrySchema = z.object({
+  user_id: userIdSchema,
+  display_name: z.string().nullable(),
+  email: z.string().nullable(),
+  department: z.string().nullable(),
+  first_seen_at: apiDateTimeSchema,
+  last_seen_at: apiDateTimeSchema,
+  asset_count: z.number().int().nonnegative(),
+});
+export type UserDirectoryEntry = z.infer<typeof userDirectoryEntrySchema>;
+
+export const userDirectoryResponseSchema = z.object({
+  items: z.array(userDirectoryEntrySchema),
+});
+export type UserDirectoryResponse = z.infer<typeof userDirectoryResponseSchema>;
 
 /** 用户空间统计中的逐素材字节明细。视频的 total_bytes 包含首帧缩略图。 */
 export const userStorageUsageItemSchema = z.object({
@@ -498,7 +658,6 @@ export const apiV1AssetDetailSchema = apiV1AssetSummarySchema.extend({
   original_filename: z.string(),
   mime_type: z.string(),
   size_bytes: z.number().int().nonnegative(),
-  auto_publish: z.boolean(),
   segment_start_seconds: z.number().nonnegative().nullable(),
   segment_end_seconds: z.number().nonnegative().nullable(),
   failure: taskErrorSchema,
