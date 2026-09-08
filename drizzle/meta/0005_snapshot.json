@@ -2968,4 +2968,672 @@
           "type": "varchar(36)",
           "primaryKey": false,
           "notNull": false,
-"autoincrement": false},"user_id": {"name": "user_id","type": "varchar(191)","primaryKey": false,"notNull": false,"autoincrement": false},"media_object_id": {"name": "media_object_id","type": "varchar(36)","primaryKey": false,"notNull": false,"autoincrement": false},"public_media_object_id": {"name": "public_media_object_id","type": "varchar(36)","primaryKey": false,"notNull": false,"autoincrement": false},"private_media_object_id": {"name": "private_media_object_id","type": "varchar(36)","primaryKey": false,"notNull": false,"autoincrement": false},"original_filename": {"name": "original_filename","type": "varchar(255)","primaryKey": false,"notNull": true,"autoincrement": false},"mime_type": {"name": "mime_type","type": "varchar(255)","primaryKey": false,"notNull": true,"autoincrement": false},"size_bytes": {"name": "size_bytes","type": "bigint unsigned","primaryKey": false,"notNull": true,"autoincrement": false},"duration_ms": {"name": "duration_ms","type": "bigint unsigned","primaryKey": false,"notNull": false,"autoincrement": false},"generated_segment_count": {"name": "generated_segment_count","type": "int unsigned","primaryKey": false,"notNull": true,"autoincrement": false,"default": 0},"status": {"name": "status","type": "enum('queued','running','done','failed')","primaryKey": false,"notNull": true,"autoincrement": false,"default": "'queued'"},"error_code": {"name": "error_code","type": "varchar(64)","primaryKey": false,"notNull": false,"autoincrement": false},"error_message": {"name": "error_message","type": "text","primaryKey": false,"notNull": false,"autoincrement": false},"error_details": {"name": "error_details","type": "json","primaryKey": false,"notNull": false,"autoincrement": false},"expires_at": {"name": "expires_at","type": "datetime(3)","primaryKey": false,"notNull": false,"autoincrement": false},"created_at": {"name": "created_at","type": "datetime(3)","primaryKey": false,"notNull": true,"autoincrement": false},"updated_at": {"name": "updated_at","type": "datetime(3)","primaryKey": false,"notNull": true,"autoincrement": false},"deleted_at": {"name": "deleted_at","type": "datetime(3)","primaryKey": false,"notNull": false,"autoincrement": false}},"indexes": {"video_sources_task_item_unique": {"name": "video_sources_task_item_unique","columns": ["task_item_id"],"isUnique": true},"video_sources_user_created_idx": {"name": "video_sources_user_created_idx","columns": ["user_id","created_at"],"isUnique": false},"video_sources_expires_idx": {"name": "video_sources_expires_idx","columns": ["expires_at"],"isUnique": false}},"foreignKeys": {"video_sources_task_id_tasks_id_fk": {"name": "video_sources_task_id_tasks_id_fk","tableFrom": "video_sources","tableTo": "tasks","columnsFrom": ["task_id"],"columnsTo": ["id"],"onDelete": "set null","onUpdate": "no action"},"video_sources_task_item_id_task_items_id_fk": {"name": "video_sources_task_item_id_task_items_id_fk","tableFrom": "video_sources","tableTo": "task_items","columnsFrom": ["task_item_id"],"columnsTo": ["id"],"onDelete": "set null","onUpdate": "no action"},"video_sources_media_object_id_media_objects_id_fk": {"name": "video_sources_media_object_id_media_objects_id_fk","tableFrom": "video_sources","tableTo": "media_objects","columnsFrom": ["media_object_id"],"columnsTo": ["id"],"onDelete": "set null","onUpdate": "no action"},"video_sources_public_media_object_id_media_objects_id_fk": {"name": "video_sources_public_media_object_id_media_objects_id_fk","tableFrom": "video_sources","tableTo": "media_objects","columnsFrom": ["public_media_object_id"],"columnsTo": ["id"],"onDelete": "set null","onUpdate": "no action"},"video_sources_private_media_object_id_media_objects_id_fk": {"name": "video_sources_private_media_object_id_media_objects_id_fk","tableFrom": "video_sources","tableTo": "media_objects","columnsFrom": ["private_media_object_id"],"columnsTo": ["id"],"onDelete": "set null","onUpdate": "no action"}},"compositePrimaryKeys": {"video_sources_id": {"name": "video_sources_id","columns": ["id"]}},"uniqueConstraints": {},"checkConstraint": {}}},"views": {"analysis_result_entries": {"columns": {"id": {"name": "id","type": "varchar(36)","primaryKey": false,"notNull": true,"autoincrement": false},"kind": {"name": "kind","type": "enum('public','private')","primaryKey": false,"notNull": true,"autoincrement": false},"asset_id": {"name": "asset_id","type": "varchar(36)","primaryKey": false,"notNull": true,"autoincrement": false},"schema_version": {"name": "schema_version","type": "int unsigned","primaryKey": false,"notNull": true,"autoincrement": false},"result_json": {"name": "result_json","type": "json","primaryKey": false,"notNull": true,"autoincrement": false},"model_protocol": {"name": "model_protocol","type": "varchar(64)","primaryKey": false,"notNull": true,"autoincrement": false},"model_name": {"name": "model_name","type": "varchar(255)","primaryKey": false,"notNull": true,"autoincrement": false},"completed_at": {"name": "completed_at","type": "datetime(3)","primaryKey": false,"notNull": true,"autoincrement": false}},"name": "analysis_result_entries","isExisting": false,"definition": "\n  select id, 'public' as kind, public_asset_id as asset_id, schema_version,\n    result_json, model_protocol, model_name, completed_at\n  from analysis_results where public_asset_id is not null\n  union all\n  select id, 'private' as kind, private_asset_id as asset_id, schema_version,\n    result_json, model_protocol, model_name, completed_at\n  from analysis_results where private_asset_id is not null\n","algorithm": "undefined","sqlSecurity": "definer"},"asset_entries": {"columns": {"kind": {"name": "kind","type": "enum('public','private')","primaryKey": false,"notNull": true,"autoincrement": false},"id": {"name": "id","type": "varchar(36)","primaryKey": false,"notNull": true,"autoincrement": false},"user_id": {"name": "user_id","type": "varchar(191)","primaryKey": false,"notNull": false,"autoincrement": false},"uploader_user_id": {"name": "uploader_user_id","type": "varchar(191)","primaryKey": false,"notNull": false,"autoincrement": false},"public_asset_id": {"name": "public_asset_id","type": "varchar(36)","primaryKey": false,"notNull": false,"autoincrement": false},"task_id": {"name": "task_id","type": "varchar(36)","primaryKey": false,"notNull": false,"autoincrement": false},"task_item_id": {"name": "task_item_id","type": "varchar(36)","primaryKey": false,"notNull": false,"autoincrement": false},"task_item_segment_id": {"name": "task_item_segment_id","type": "varchar(36)","primaryKey": false,"notNull": false,"autoincrement": false},"video_source_id": {"name": "video_source_id","type": "varchar(36)","primaryKey": false,"notNull": false,"autoincrement": false},"media_object_id": {"name": "media_object_id","type": "varchar(36)","primaryKey": false,"notNull": false,"autoincrement": false},"thumbnail_media_object_id": {"name": "thumbnail_media_object_id","type": "varchar(36)","primaryKey": false,"notNull": false,"autoincrement": false},"segment_index": {"name": "segment_index","type": "int unsigned","primaryKey": false,"notNull": false,"autoincrement": false},"segment_start_ms": {"name": "segment_start_ms","type": "bigint unsigned","primaryKey": false,"notNull": false,"autoincrement": false},"segment_end_ms": {"name": "segment_end_ms","type": "bigint unsigned","primaryKey": false,"notNull": false,"autoincrement": false},"name": {"name": "name","type": "varchar(255)","primaryKey": false,"notNull": true,"autoincrement": false},"description": {"name": "description","type": "text","primaryKey": false,"notNull": true,"autoincrement": false},"media_type": {"name": "media_type","type": "enum('image','video')","primaryKey": false,"notNull": true,"autoincrement": false},"original_filename": {"name": "original_filename","type": "varchar(255)","primaryKey": false,"notNull": true,"autoincrement": false},"original_path": {"name": "original_path","type": "varchar(1024)","primaryKey": false,"notNull": true,"autoincrement": false},"mime_type": {"name": "mime_type","type": "varchar(255)","primaryKey": false,"notNull": true,"autoincrement": false},"size_bytes": {"name": "size_bytes","type": "bigint unsigned","primaryKey": false,"notNull": true,"autoincrement": false},"processing_status": {"name": "processing_status","type": "enum('queued','validating','analyzing','completed','failed')","primaryKey": false,"notNull": true,"autoincrement": false},"review_status": {"name": "review_status","type": "enum('pending_review','published','deleted')","primaryKey": false,"notNull": true,"autoincrement": false},"failure_code": {"name": "failure_code","type": "varchar(64)","primaryKey": false,"notNull": false,"autoincrement": false},"failure_message": {"name": "failure_message","type": "text","primaryKey": false,"notNull": false,"autoincrement": false},"created_at": {"name": "created_at","type": "datetime(3)","primaryKey": false,"notNull": true,"autoincrement": false},"updated_at": {"name": "updated_at","type": "datetime(3)","primaryKey": false,"notNull": true,"autoincrement": false},"deleted_at": {"name": "deleted_at","type": "datetime(3)","primaryKey": false,"notNull": false,"autoincrement": false}},"name": "asset_entries","isExisting": false,"definition": "\n  select 'public' as kind, id, null as user_id, uploader_user_id,\n    null as public_asset_id, task_id, task_item_id, task_item_segment_id,\n    video_source_id, media_object_id, thumbnail_media_object_id, segment_index,\n    segment_start_ms, segment_end_ms, name, description, media_type,\n    original_filename, original_path, mime_type, size_bytes, processing_status,\n    review_status, failure_code, failure_message, created_at, updated_at, deleted_at\n  from public_assets\n  union all\n  select 'private' as kind, id, user_id, null as uploader_user_id,\n    public_asset_id, task_id, task_item_id, task_item_segment_id,\n    video_source_id, media_object_id, thumbnail_media_object_id, segment_index,\n    segment_start_ms, segment_end_ms, name, description, media_type,\n    original_filename, original_path, mime_type, size_bytes, processing_status,\n    'published' as review_status, failure_code, failure_message,\n    created_at, updated_at, deleted_at\n  from private_assets\n","algorithm": "undefined","sqlSecurity": "definer"},"asset_tag_entries": {"columns": {"id": {"name": "id","type": "varchar(36)","primaryKey": false,"notNull": true,"autoincrement": false},"kind": {"name": "kind","type": "enum('public','private')","primaryKey": false,"notNull": true,"autoincrement": false},"asset_id": {"name": "asset_id","type": "varchar(36)","primaryKey": false,"notNull": true,"autoincrement": false},"tag_id": {"name": "tag_id","type": "varchar(36)","primaryKey": false,"notNull": true,"autoincrement": false},"source": {"name": "source","type": "enum('model','human')","primaryKey": false,"notNull": true,"autoincrement": false},"confidence": {"name": "confidence","type": "double","primaryKey": false,"notNull": false,"autoincrement": false}},"name": "asset_tag_entries","isExisting": false,"definition": "\n  select id, 'public' as kind, public_asset_id as asset_id, tag_id, source, confidence\n  from asset_tags where public_asset_id is not null\n  union all\n  select id, 'private' as kind, private_asset_id as asset_id, tag_id, source, confidence\n  from asset_tags where private_asset_id is not null\n","algorithm": "undefined","sqlSecurity": "definer"},"asset_tag_rejection_entries": {"columns": {"id": {"name": "id","type": "varchar(36)","primaryKey": false,"notNull": true,"autoincrement": false},"kind": {"name": "kind","type": "enum('public','private')","primaryKey": false,"notNull": true,"autoincrement": false},"asset_id": {"name": "asset_id","type": "varchar(36)","primaryKey": false,"notNull": true,"autoincrement": false},"category": {"name": "category","type": "varchar(64)","primaryKey": false,"notNull": true,"autoincrement": false},"normalized_value": {"name": "normalized_value","type": "varchar(128)","primaryKey": false,"notNull": true,"autoincrement": false}},"name": "asset_tag_rejection_entries","isExisting": false,"definition": "\n  select id, 'public' as kind, public_asset_id as asset_id, category, normalized_value\n  from asset_tag_rejections where public_asset_id is not null\n  union all\n  select id, 'private' as kind, private_asset_id as asset_id, category, normalized_value\n  from asset_tag_rejections where private_asset_id is not null\n","algorithm": "undefined","sqlSecurity": "definer"},"search_index_entries": {"columns": {"id": {"name": "id","type": "varchar(36)","primaryKey": false,"notNull": true,"autoincrement": false},"kind": {"name": "kind","type": "enum('public','private')","primaryKey": false,"notNull": true,"autoincrement": false},"asset_id": {"name": "asset_id","type": "varchar(36)","primaryKey": false,"notNull": true,"autoincrement": false},"status": {"name": "status","type": "enum('queued','running','done','failed','deleted')","primaryKey": false,"notNull": true,"autoincrement": false},"content_hash": {"name": "content_hash","type": "varchar(64)","primaryKey": false,"notNull": false,"autoincrement": false},"indexed_at": {"name": "indexed_at","type": "datetime(3)","primaryKey": false,"notNull": false,"autoincrement": false},"error_message": {"name": "error_message","type": "text","primaryKey": false,"notNull": false,"autoincrement": false},"updated_at": {"name": "updated_at","type": "datetime(3)","primaryKey": false,"notNull": true,"autoincrement": false}},"name": "search_index_entries","isExisting": false,"definition": "\n  select id, 'public' as kind, public_asset_id as asset_id, status,\n    content_hash, indexed_at, error_message, updated_at\n  from search_index_state where public_asset_id is not null\n  union all\n  select id, 'private' as kind, private_asset_id as asset_id, status,\n    content_hash, indexed_at, error_message, updated_at\n  from search_index_state where private_asset_id is not null\n","algorithm": "undefined","sqlSecurity": "definer"}},"_meta": {"schemas": {},"tables": {},"columns": {}},"internal": {"tables": {},"indexes": {}}}
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "varchar(191)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "media_object_id": {
+          "name": "media_object_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "public_media_object_id": {
+          "name": "public_media_object_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "private_media_object_id": {
+          "name": "private_media_object_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "original_filename": {
+          "name": "original_filename",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mime_type": {
+          "name": "mime_type",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "size_bytes": {
+          "name": "size_bytes",
+          "type": "bigint unsigned",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "duration_ms": {
+          "name": "duration_ms",
+          "type": "bigint unsigned",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "generated_segment_count": {
+          "name": "generated_segment_count",
+          "type": "int unsigned",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "status": {
+          "name": "status",
+          "type": "enum('queued','running','done','failed')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'queued'"
+        },
+        "error_code": {
+          "name": "error_code",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "error_message": {
+          "name": "error_message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "error_details": {
+          "name": "error_details",
+          "type": "json",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "video_sources_task_item_unique": {
+          "name": "video_sources_task_item_unique",
+          "columns": [
+            "task_item_id"
+          ],
+          "isUnique": true
+        },
+        "video_sources_user_created_idx": {
+          "name": "video_sources_user_created_idx",
+          "columns": [
+            "user_id",
+            "created_at"
+          ],
+          "isUnique": false
+        },
+        "video_sources_expires_idx": {
+          "name": "video_sources_expires_idx",
+          "columns": [
+            "expires_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "video_sources_task_id_tasks_id_fk": {
+          "name": "video_sources_task_id_tasks_id_fk",
+          "tableFrom": "video_sources",
+          "tableTo": "tasks",
+          "columnsFrom": [
+            "task_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_sources_task_item_id_task_items_id_fk": {
+          "name": "video_sources_task_item_id_task_items_id_fk",
+          "tableFrom": "video_sources",
+          "tableTo": "task_items",
+          "columnsFrom": [
+            "task_item_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_sources_media_object_id_media_objects_id_fk": {
+          "name": "video_sources_media_object_id_media_objects_id_fk",
+          "tableFrom": "video_sources",
+          "tableTo": "media_objects",
+          "columnsFrom": [
+            "media_object_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_sources_public_media_object_id_media_objects_id_fk": {
+          "name": "video_sources_public_media_object_id_media_objects_id_fk",
+          "tableFrom": "video_sources",
+          "tableTo": "media_objects",
+          "columnsFrom": [
+            "public_media_object_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_sources_private_media_object_id_media_objects_id_fk": {
+          "name": "video_sources_private_media_object_id_media_objects_id_fk",
+          "tableFrom": "video_sources",
+          "tableTo": "media_objects",
+          "columnsFrom": [
+            "private_media_object_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "video_sources_id": {
+          "name": "video_sources_id",
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraint": {}
+    }
+  },
+  "views": {
+    "analysis_result_entries": {
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "enum('public','private')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "asset_id": {
+          "name": "asset_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "schema_version": {
+          "name": "schema_version",
+          "type": "int unsigned",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "result_json": {
+          "name": "result_json",
+          "type": "json",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "model_protocol": {
+          "name": "model_protocol",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "model_name": {
+          "name": "model_name",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "name": "analysis_result_entries",
+      "isExisting": false,
+      "definition": "\n  select id, 'public' as kind, public_asset_id as asset_id, schema_version,\n    result_json, model_protocol, model_name, completed_at\n  from analysis_results where public_asset_id is not null\n  union all\n  select id, 'private' as kind, private_asset_id as asset_id, schema_version,\n    result_json, model_protocol, model_name, completed_at\n  from analysis_results where private_asset_id is not null\n",
+      "algorithm": "undefined",
+      "sqlSecurity": "definer"
+    },
+    "asset_entries": {
+      "columns": {
+        "kind": {
+          "name": "kind",
+          "type": "enum('public','private')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "id": {
+          "name": "id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "varchar(191)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "uploader_user_id": {
+          "name": "uploader_user_id",
+          "type": "varchar(191)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "public_asset_id": {
+          "name": "public_asset_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "task_id": {
+          "name": "task_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "task_item_id": {
+          "name": "task_item_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "task_item_segment_id": {
+          "name": "task_item_segment_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "video_source_id": {
+          "name": "video_source_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "media_object_id": {
+          "name": "media_object_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "thumbnail_media_object_id": {
+          "name": "thumbnail_media_object_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "segment_index": {
+          "name": "segment_index",
+          "type": "int unsigned",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "segment_start_ms": {
+          "name": "segment_start_ms",
+          "type": "bigint unsigned",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "segment_end_ms": {
+          "name": "segment_end_ms",
+          "type": "bigint unsigned",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "media_type": {
+          "name": "media_type",
+          "type": "enum('image','video')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "original_filename": {
+          "name": "original_filename",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "original_path": {
+          "name": "original_path",
+          "type": "varchar(1024)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mime_type": {
+          "name": "mime_type",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "size_bytes": {
+          "name": "size_bytes",
+          "type": "bigint unsigned",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "processing_status": {
+          "name": "processing_status",
+          "type": "enum('queued','validating','analyzing','completed','failed')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "review_status": {
+          "name": "review_status",
+          "type": "enum('pending_review','published','deleted')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "failure_code": {
+          "name": "failure_code",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "failure_message": {
+          "name": "failure_message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "name": "asset_entries",
+      "isExisting": false,
+      "definition": "\n  select 'public' as kind, id, null as user_id, uploader_user_id,\n    null as public_asset_id, task_id, task_item_id, task_item_segment_id,\n    video_source_id, media_object_id, thumbnail_media_object_id, segment_index,\n    segment_start_ms, segment_end_ms, name, description, media_type,\n    original_filename, original_path, mime_type, size_bytes, processing_status,\n    review_status, failure_code, failure_message, created_at, updated_at, deleted_at\n  from public_assets\n  union all\n  select 'private' as kind, id, user_id, null as uploader_user_id,\n    public_asset_id, task_id, task_item_id, task_item_segment_id,\n    video_source_id, media_object_id, thumbnail_media_object_id, segment_index,\n    segment_start_ms, segment_end_ms, name, description, media_type,\n    original_filename, original_path, mime_type, size_bytes, processing_status,\n    'published' as review_status, failure_code, failure_message,\n    created_at, updated_at, deleted_at\n  from private_assets\n",
+      "algorithm": "undefined",
+      "sqlSecurity": "definer"
+    },
+    "asset_tag_entries": {
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "enum('public','private')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "asset_id": {
+          "name": "asset_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "tag_id": {
+          "name": "tag_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source": {
+          "name": "source",
+          "type": "enum('model','human')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "confidence": {
+          "name": "confidence",
+          "type": "double",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "name": "asset_tag_entries",
+      "isExisting": false,
+      "definition": "\n  select id, 'public' as kind, public_asset_id as asset_id, tag_id, source, confidence\n  from asset_tags where public_asset_id is not null\n  union all\n  select id, 'private' as kind, private_asset_id as asset_id, tag_id, source, confidence\n  from asset_tags where private_asset_id is not null\n",
+      "algorithm": "undefined",
+      "sqlSecurity": "definer"
+    },
+    "asset_tag_rejection_entries": {
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "enum('public','private')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "asset_id": {
+          "name": "asset_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "category": {
+          "name": "category",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "normalized_value": {
+          "name": "normalized_value",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "name": "asset_tag_rejection_entries",
+      "isExisting": false,
+      "definition": "\n  select id, 'public' as kind, public_asset_id as asset_id, category, normalized_value\n  from asset_tag_rejections where public_asset_id is not null\n  union all\n  select id, 'private' as kind, private_asset_id as asset_id, category, normalized_value\n  from asset_tag_rejections where private_asset_id is not null\n",
+      "algorithm": "undefined",
+      "sqlSecurity": "definer"
+    },
+    "search_index_entries": {
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "enum('public','private')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "asset_id": {
+          "name": "asset_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "enum('queued','running','done','failed','deleted')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "content_hash": {
+          "name": "content_hash",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "indexed_at": {
+          "name": "indexed_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "error_message": {
+          "name": "error_message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "name": "search_index_entries",
+      "isExisting": false,
+      "definition": "\n  select id, 'public' as kind, public_asset_id as asset_id, status,\n    content_hash, indexed_at, error_message, updated_at\n  from search_index_state where public_asset_id is not null\n  union all\n  select id, 'private' as kind, private_asset_id as asset_id, status,\n    content_hash, indexed_at, error_message, updated_at\n  from search_index_state where private_asset_id is not null\n",
+      "algorithm": "undefined",
+      "sqlSecurity": "definer"
+    }
+  },
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "tables": {},
+    "indexes": {}
+  }
+}
