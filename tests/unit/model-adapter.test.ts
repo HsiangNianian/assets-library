@@ -1240,7 +1240,7 @@ describe("model adapter", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("accepts quoted English terms in the description while keeping tags strict", async () => {
+  it("accepts source-language English terms in descriptions while keeping tags strict", async () => {
     const { root, input } = await createImageFixture("asset-narrative-latin-");
     const config = loadConfig({
       MEDIA_ROOT: root,
@@ -1316,6 +1316,42 @@ describe("model adapter", () => {
       chat_template_kwargs: { enable_thinking: false },
     });
     await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("preserves an explicitly empty fallback key without inheriting primary credentials", () => {
+    const config = loadConfig({
+      VLM_BASE_URL: "https://primary.example/v1",
+      VLM_NAME: "primary",
+      VLM_API_KEY: "primary-test-key",
+      VLM_FALLBACK_NAMES: "fallback",
+      VLM_FALLBACK_BASE_URL: "https://fallback.example/v1",
+      VLM_FALLBACK_API_KEY: "",
+    });
+    expect(config.models.vlmCandidates[0]?.apiKey).toBe("primary-test-key");
+    expect(config.models.vlmCandidates[1]?.apiKey).toBeUndefined();
+  });
+
+  it("caps persisted OCR at 600 Unicode characters even when the model ignores the prompt", async () => {
+    const { root, input } = await createImageFixture("asset-ocr-cap-");
+    const config = loadConfig({ MEDIA_ROOT: root, VLM_BASE_URL: "https://vision.example/v1", VLM_NAME: "primary" });
+    const text = "文😀".repeat(400);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      chatContentResponse(JSON.stringify({
+        kind: "image", primaryCategory: "科技", description: "中文测试图片",
+        tags: { scene: ["科技"], object: [], person: [], style: [], color_composition: [] },
+        ocr: { text, unavailableReason: null },
+      })),
+    );
+    try {
+      const outcome = await new OpenAICompatibleAnalyzer(config).analyze(input);
+      expect(outcome.result.kind).toBe("image");
+      if (outcome.result.kind === "image") {
+        expect(outcome.result.ocr.text).toBe("文😀".repeat(300));
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("instructs the model to cap ocr.text length and to emit primaryCategory", async () => {
