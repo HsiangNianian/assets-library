@@ -368,7 +368,9 @@ function configuredModelCandidates(
     .map((name, index) => {
       const isPrimary = index === 0 && primaryName?.trim();
       const targetBaseUrl = isPrimary ? baseUrl : (fallbackBaseUrl || baseUrl);
-      const targetApiKey = isPrimary ? apiKey : (fallbackApiKey || apiKey);
+      const targetApiKey = isPrimary
+        ? apiKey
+        : (fallbackApiKey === undefined ? apiKey : fallbackApiKey);
       return modelTarget(role, protocol, targetBaseUrl, targetApiKey, name, enableThinking);
     })
     .filter((target): target is ConfiguredModelTarget => target.configured);
