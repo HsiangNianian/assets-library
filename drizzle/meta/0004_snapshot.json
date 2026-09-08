@@ -1978,4 +1978,198 @@
           "autoincrement": false
         },
         "user_id": {
-"name": "user_id","type": "varchar(191)","primaryKey": false,"notNull": false,"autoincrement": false},"media_object_id": {"name": "media_object_id","type": "varchar(36)","primaryKey": false,"notNull": false,"autoincrement": false},"original_filename": {"name": "original_filename","type": "varchar(255)","primaryKey": false,"notNull": true,"autoincrement": false},"mime_type": {"name": "mime_type","type": "varchar(255)","primaryKey": false,"notNull": true,"autoincrement": false},"size_bytes": {"name": "size_bytes","type": "bigint unsigned","primaryKey": false,"notNull": true,"autoincrement": false},"duration_ms": {"name": "duration_ms","type": "bigint unsigned","primaryKey": false,"notNull": false,"autoincrement": false},"generated_segment_count": {"name": "generated_segment_count","type": "int unsigned","primaryKey": false,"notNull": true,"autoincrement": false,"default": 0},"status": {"name": "status","type": "enum('queued','running','done','failed')","primaryKey": false,"notNull": true,"autoincrement": false,"default": "'queued'"},"error_code": {"name": "error_code","type": "varchar(64)","primaryKey": false,"notNull": false,"autoincrement": false},"error_message": {"name": "error_message","type": "text","primaryKey": false,"notNull": false,"autoincrement": false},"error_details": {"name": "error_details","type": "json","primaryKey": false,"notNull": false,"autoincrement": false},"expires_at": {"name": "expires_at","type": "datetime(3)","primaryKey": false,"notNull": false,"autoincrement": false},"created_at": {"name": "created_at","type": "datetime(3)","primaryKey": false,"notNull": true,"autoincrement": false},"updated_at": {"name": "updated_at","type": "datetime(3)","primaryKey": false,"notNull": true,"autoincrement": false},"deleted_at": {"name": "deleted_at","type": "datetime(3)","primaryKey": false,"notNull": false,"autoincrement": false}},"indexes": {"video_sources_task_item_unique": {"name": "video_sources_task_item_unique","columns": ["task_item_id"],"isUnique": true},"video_sources_user_created_idx": {"name": "video_sources_user_created_idx","columns": ["user_id","created_at"],"isUnique": false},"video_sources_expires_idx": {"name": "video_sources_expires_idx","columns": ["expires_at"],"isUnique": false}},"foreignKeys": {"video_sources_task_id_tasks_id_fk": {"name": "video_sources_task_id_tasks_id_fk","tableFrom": "video_sources","tableTo": "tasks","columnsFrom": ["task_id"],"columnsTo": ["id"],"onDelete": "set null","onUpdate": "no action"},"video_sources_task_item_id_task_items_id_fk": {"name": "video_sources_task_item_id_task_items_id_fk","tableFrom": "video_sources","tableTo": "task_items","columnsFrom": ["task_item_id"],"columnsTo": ["id"],"onDelete": "set null","onUpdate": "no action"},"video_sources_media_object_id_media_objects_id_fk": {"name": "video_sources_media_object_id_media_objects_id_fk","tableFrom": "video_sources","tableTo": "media_objects","columnsFrom": ["media_object_id"],"columnsTo": ["id"],"onDelete": "set null","onUpdate": "no action"}},"compositePrimaryKeys": {"video_sources_id": {"name": "video_sources_id","columns": ["id"]}},"uniqueConstraints": {},"checkConstraint": {}}},"views": {},"_meta": {"schemas": {},"tables": {},"columns": {}},"internal": {"tables": {},"indexes": {}}}
+          "name": "user_id",
+          "type": "varchar(191)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "media_object_id": {
+          "name": "media_object_id",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "original_filename": {
+          "name": "original_filename",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mime_type": {
+          "name": "mime_type",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "size_bytes": {
+          "name": "size_bytes",
+          "type": "bigint unsigned",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "duration_ms": {
+          "name": "duration_ms",
+          "type": "bigint unsigned",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "generated_segment_count": {
+          "name": "generated_segment_count",
+          "type": "int unsigned",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "status": {
+          "name": "status",
+          "type": "enum('queued','running','done','failed')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'queued'"
+        },
+        "error_code": {
+          "name": "error_code",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "error_message": {
+          "name": "error_message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "error_details": {
+          "name": "error_details",
+          "type": "json",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "video_sources_task_item_unique": {
+          "name": "video_sources_task_item_unique",
+          "columns": [
+            "task_item_id"
+          ],
+          "isUnique": true
+        },
+        "video_sources_user_created_idx": {
+          "name": "video_sources_user_created_idx",
+          "columns": [
+            "user_id",
+            "created_at"
+          ],
+          "isUnique": false
+        },
+        "video_sources_expires_idx": {
+          "name": "video_sources_expires_idx",
+          "columns": [
+            "expires_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "video_sources_task_id_tasks_id_fk": {
+          "name": "video_sources_task_id_tasks_id_fk",
+          "tableFrom": "video_sources",
+          "tableTo": "tasks",
+          "columnsFrom": [
+            "task_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_sources_task_item_id_task_items_id_fk": {
+          "name": "video_sources_task_item_id_task_items_id_fk",
+          "tableFrom": "video_sources",
+          "tableTo": "task_items",
+          "columnsFrom": [
+            "task_item_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_sources_media_object_id_media_objects_id_fk": {
+          "name": "video_sources_media_object_id_media_objects_id_fk",
+          "tableFrom": "video_sources",
+          "tableTo": "media_objects",
+          "columnsFrom": [
+            "media_object_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "video_sources_id": {
+          "name": "video_sources_id",
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraint": {}
+    }
+  },
+  "views": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "tables": {},
+    "indexes": {}
+  }
+}
