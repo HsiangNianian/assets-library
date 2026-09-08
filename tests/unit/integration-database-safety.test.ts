@@ -45,6 +45,41 @@ describe("integration database safety", () => {
     ).toThrow("不得与 WebUI");
   });
 
+  it("allows the same schema name on a known different host", () => {
+    expect(assertDedicatedIntegrationDatabase(
+      "mysql://tester:secret@integration.example.test/shared_test",
+      { databaseUrl: "mysql://app:secret@webui.example.test/shared_test", databaseName: "shared_test" },
+    ).hostname).toBe("integration.example.test");
+  });
+
+  it("compares the effective application schema even when the URL names another schema", () => {
+    expect(() => assertDedicatedIntegrationDatabase(
+      "mysql://tester:secret@webui.example.test/shared_test",
+      { databaseUrl: "mysql://app:secret@webui.example.test/original", databaseName: "shared_test" },
+    )).toThrow("不得与 WebUI");
+  });
+
+  it("binds a same-named test schema on a different host", () => {
+    const env = {
+      APP_MODE: "dev", DATABASE_URL: "mysql://app:secret@webui.example.test/shared_test",
+      DEV_DATABASE_NAME: "shared_test",
+    };
+    expect(bindIntegrationDatabaseEnvironment(
+      "mysql://tester:secret@integration.example.test/shared_test", env,
+    ).hostname).toBe("integration.example.test");
+  });
+
+  it("rejects the effective production host before changing the environment", () => {
+    const env = {
+      APP_MODE: "prd", DATABASE_URL: "mysql://app:secret@alias.example.test/original",
+      PRD_DATABASE_NAME: "shared_test", PRD_INTERNAL_SERVICE_HOST: "webui.example.test",
+    };
+    expect(() => bindIntegrationDatabaseEnvironment(
+      "mysql://tester:secret@webui.example.test/shared_test", env,
+    )).toThrow("不得与 WebUI");
+    expect(env.DATABASE_URL).toContain("alias.example.test");
+  });
+
   it("rejects a database without the test suffix", () => {
     expect(() =>
       assertDedicatedIntegrationDatabase(
