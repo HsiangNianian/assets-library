@@ -4,7 +4,16 @@ import os from "node:os";
 import path from "node:path";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Pool, RowDataPacket } from "mysql2/promise";
-import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  vi,
+} from "vitest";
 import {
   closeDatabase,
   inspectDatabaseConnection,
@@ -12,21 +21,30 @@ import {
 } from "@/server/db/connection";
 import { initializeDatabase } from "@/server/db/migrations";
 import {
-  assets,
+  analysisResults,
   jobs,
   mediaObjects,
+  privateAssets,
+  publicAssets,
   taskItems,
   tasks,
   users,
   videoSources,
 } from "@/server/db/schema";
 import type { ObjectStorage } from "@/server/storage/object-storage";
+import {
+  bindIntegrationDatabaseEnvironment,
+  integrationApplicationTables as applicationTables,
+  truncateIntegrationTables,
+} from "../helpers/integration-database";
 
 const searchAnalysisMock = vi.hoisted(() => vi.fn());
 const deleteAnalysisMock = vi.hoisted(() => vi.fn(async () => undefined));
+const semanticSearchEnabledMock = vi.hoisted(() => vi.fn(() => true));
 vi.mock("@/server/search/chroma", () => ({
   searchAnalysis: searchAnalysisMock,
   deleteAnalysis: deleteAnalysisMock,
+  semanticSearchEnabled: semanticSearchEnabledMock,
 }));
 
 try {
@@ -39,57 +57,18 @@ try {
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const mysqlTest = testDatabaseUrl ? describe : describe.skip;
 
-const applicationTables = [
-  "analysis_results",
-  "asset_tag_rejections",
-  "asset_tags",
-  "assets",
-  "callback_deliveries",
-  "idempotency_requests",
-  "jobs",
-  "media_objects",
-  "outbox_events",
-  "search_index_state",
-  "tags",
-  "task_item_segments",
-  "task_items",
-  "tasks",
-  "users",
-  "video_sources",
-] as const;
-
 type Repository = typeof import("@/server/repositories/assets");
-
-function assertDedicatedTestDatabase(url: string) {
-  const name = decodeURIComponent(new URL(url).pathname.replace(/^\//, ""));
-  if (!name.endsWith("_test")) {
-    throw new Error("TEST_DATABASE_URL 必须指向以 _test 结尾的独立测试库。");
-  }
-}
-
-/** 仅清空专用测试库中的业务表，绝不删除数据库或生产 schema。 */
-async function truncateApplicationTables(pool: Pool) {
-  const connection = await pool.getConnection();
-  try {
-    await connection.query("SET FOREIGN_KEY_CHECKS = 0");
-    for (const table of applicationTables) {
-      await connection.query(`TRUNCATE TABLE \`${table}\``);
-    }
-  } finally {
-    await connection.query("SET FOREIGN_KEY_CHECKS = 1");
-    connection.release();
-  }
-}
 
 mysqlTest("MySQL 数据层", () => {
   let migrationConnection: DatabaseConnection;
   let repositoryPool: Pool;
   let repository: Repository;
+  let lifecycle: typeof import("@/server/services/task-lifecycle");
 
   beforeAll(async () => {
     if (!testDatabaseUrl) return;
-    assertDedicatedTestDatabase(testDatabaseUrl);
-    process.env.DATABASE_URL = testDatabaseUrl;
+    // 必须先同步模式库名，否则 loadConfig 会把已校验 URL 覆写回开发库。
+    bindIntegrationDatabaseEnvironment(testDatabaseUrl);
     migrationConnection = await initializeDatabase({
       url: testDatabaseUrl,
       sslCaPath: process.env.DATABASE_SSL_CA_PATH || undefined,
@@ -97,15 +76,31 @@ mysqlTest("MySQL 数据层", () => {
     });
     repository = await import("@/server/repositories/assets");
     ({ pool: repositoryPool } = await import("@/server/db"));
+    lifecycle = await import("@/server/services/task-lifecycle");
   }, 30_000);
 
   beforeEach(async () => {
-    await truncateApplicationTables(migrationConnection.pool);
+    semanticSearchEnabledMock.mockReset().mockReturnValue(true);
+    await truncateIntegrationTables(migrationConnection.pool);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    // 即使用例断言失败也清理，避免最后一个 seedAsset 留在下次启动的 WebUI 中。
+    if (migrationConnection) {
+      await truncateIntegrationTables(migrationConnection.pool);
+    }
   });
 
   afterAll(async () => {
-    if (repositoryPool) await repositoryPool.end();
-    if (migrationConnection) await closeDatabase(migrationConnection);
+    try {
+      if (migrationConnection) {
+        await truncateIntegrationTables(migrationConnection.pool);
+      }
+    } finally {
+      if (repositoryPool) await repositoryPool.end();
+      if (migrationConnection) await closeDatabase(migrationConnection);
+    }
   });
 
   async function insertSchedulingTask(id: string, createdAt: Date) {
@@ -220,13 +215,12 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 10,
-      directPublish: false,
       enqueueAnalysis: false,
     });
     await migrationConnection.db
-      .update(assets)
+      .update(publicAssets)
       .set({ processingStatus: "failed", reviewStatus: "published" })
-      .where(eq(assets.id, assetId));
+      .where(eq(publicAssets.id, assetId));
     const created = await repository.createMutationTask({
       type: "retry",
       assetId,
@@ -277,7 +271,6 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 10,
-      directPublish: false,
       enqueueAnalysis: false,
     });
     const jobId = await insertSchedulingJob({
@@ -287,7 +280,7 @@ mysqlTest("MySQL 数据层", () => {
     });
     await migrationConnection.db
       .update(jobs)
-      .set({ assetId })
+      .set({ publicAssetId: assetId })
       .where(eq(jobs.id, jobId));
     const staleJob = await repository.claimNextJob("old-worker");
     if (!staleJob) throw new Error("旧 worker 未领取作业。");
@@ -344,7 +337,6 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 10,
-      directPublish: false,
       enqueueAnalysis: false,
     });
     const mutationTaskIds: string[] = [];
@@ -396,10 +388,23 @@ mysqlTest("MySQL 数据层", () => {
          FROM information_schema.tables
         WHERE table_schema = DATABASE()
           AND table_type = 'BASE TABLE'
-          AND table_name <> '__drizzle_migrations'
+          AND table_name NOT IN ('__drizzle_migrations', 'assets')
         ORDER BY table_name`,
     );
     expect(tableRows.map((row) => row.tableName)).toEqual(applicationTables);
+
+    const [legacyColumnRows] = await migrationConnection.pool.query<
+      Array<RowDataPacket & { tableName: string; columnName: string }>
+    >(
+      `SELECT table_name AS tableName, column_name AS columnName
+         FROM information_schema.columns
+        WHERE table_schema = DATABASE()
+          AND (
+            (table_name IN ('analysis_results', 'asset_tag_rejections', 'asset_tags', 'jobs', 'search_index_state') AND column_name = 'asset_id')
+            OR (table_name = 'video_sources' AND column_name = 'media_object_id')
+          )`,
+    );
+    expect(legacyColumnRows).toEqual([]);
 
     const [viewRows] = await migrationConnection.pool.query<
       Array<RowDataPacket & { tableName: string }>
@@ -425,6 +430,64 @@ mysqlTest("MySQL 数据层", () => {
     expect(inspection.sslCipher).toBeTruthy();
   });
 
+  test("公私关联约束拒绝双目标，并在公共副本删除后解除配对", async () => {
+    const now = new Date();
+    const publicAssetId = crypto.randomUUID();
+    const privateAssetId = crypto.randomUUID();
+    await migrationConnection.db.insert(publicAssets).values({
+      id: publicAssetId,
+      name: "public",
+      description: "",
+      mediaType: "image",
+      originalFilename: "public.jpg",
+      originalPath: "/tmp/public.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await migrationConnection.db.insert(privateAssets).values({
+      id: privateAssetId,
+      publicAssetId,
+      userId: "owner",
+      name: "private",
+      description: "",
+      mediaType: "image",
+      originalFilename: "private.jpg",
+      originalPath: "/tmp/private.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await expect(
+      migrationConnection.db.insert(analysisResults).values({
+        id: crypto.randomUUID(),
+        publicAssetId,
+        privateAssetId,
+        resultJson: {
+          kind: "image",
+          description: "约束测试",
+          tags: { scene: [], object: [], person: [], style: [], color_composition: [] },
+          ocr: { text: null, unavailableReason: "无文字" },
+        },
+        modelProtocol: "test",
+        modelName: "test",
+        completedAt: now,
+      }),
+    ).rejects.toThrow();
+
+    await migrationConnection.db
+      .delete(publicAssets)
+      .where(eq(publicAssets.id, publicAssetId));
+    const [privateAsset] = await migrationConnection.db
+      .select({ publicAssetId: privateAssets.publicAssetId })
+      .from(privateAssets)
+      .where(eq(privateAssets.id, privateAssetId));
+    expect(privateAsset?.publicAssetId).toBeNull();
+  });
+
   test("注册用户列表保留零素材用户并忽略已删除素材", async () => {
     const now = new Date("2026-08-20T01:02:03.000Z");
     await migrationConnection.db.insert(users).values([
@@ -446,7 +509,7 @@ mysqlTest("MySQL 数据层", () => {
         updatedAt: now,
       },
     ]);
-    await migrationConnection.db.insert(assets).values([
+    await migrationConnection.db.insert(privateAssets).values([
       {
         id: crypto.randomUUID(),
         userId: "user-a",
@@ -457,7 +520,6 @@ mysqlTest("MySQL 数据层", () => {
         originalPath: "/tmp/active.jpg",
         mimeType: "image/jpeg",
         sizeBytes: 1,
-        reviewStatus: "published",
         createdAt: now,
         updatedAt: now,
       },
@@ -471,7 +533,6 @@ mysqlTest("MySQL 数据层", () => {
         originalPath: "/tmp/deleted.jpg",
         mimeType: "image/jpeg",
         sizeBytes: 1,
-        reviewStatus: "deleted",
         deletedAt: now,
         createdAt: now,
         updatedAt: now,
@@ -512,7 +573,7 @@ mysqlTest("MySQL 数据层", () => {
       id: taskId,
       type: "upload",
       userId: "user-a",
-      result: { auto_publish: true },
+      result: {},
       items: [
         {
           id: firstItemId,
@@ -729,7 +790,6 @@ mysqlTest("MySQL 数据层", () => {
       const created = await service.createUploadTask({
         user_id: null,
         callback_url: null,
-        auto_publish: false,
         items: [
           {
             filename: "interrupted.jpg",
@@ -811,7 +871,6 @@ mysqlTest("MySQL 数据层", () => {
       const created = await service.createUploadTask({
         user_id: null,
         callback_url: null,
-        auto_publish: false,
         items: [
           {
             filename: "race.jpg",
@@ -873,7 +932,7 @@ mysqlTest("MySQL 数据层", () => {
     }
   });
 
-  test("user_id 为空表示公共素材，个人删除会将素材释放到公共库", async () => {
+  test("user_id 为空创建公共素材，非空创建独立私人素材", async () => {
     const publicId = crypto.randomUUID();
     const privateId = crypto.randomUUID();
     for (const [assetId, userId] of [
@@ -889,13 +948,19 @@ mysqlTest("MySQL 数据层", () => {
         mimeType: "image/jpeg",
         mediaType: "image",
         sizeBytes: 10,
-        directPublish: true,
         enqueueAnalysis: false,
       });
-      await migrationConnection.db
-        .update(assets)
-        .set({ processingStatus: "completed", reviewStatus: "published" })
-        .where(eq(assets.id, assetId));
+      if (userId) {
+        await migrationConnection.db
+          .update(privateAssets)
+          .set({ processingStatus: "completed" })
+          .where(eq(privateAssets.id, assetId));
+      } else {
+        await migrationConnection.db
+          .update(publicAssets)
+          .set({ processingStatus: "completed", reviewStatus: "published" })
+          .where(eq(publicAssets.id, assetId));
+      }
     }
 
     expect((await repository.listAssets()).items.map((item) => item.id)).toEqual([
@@ -907,9 +972,43 @@ mysqlTest("MySQL 数据层", () => {
       ),
     ).toEqual([privateId]);
 
-    await repository.releaseAssetToPublic(privateId, "user-b");
     const publicIds = (await repository.listAssets()).items.map((item) => item.id);
-    expect(new Set(publicIds)).toEqual(new Set([publicId, privateId]));
+    expect(publicIds).toEqual([publicId]);
+  });
+
+  test("公共列表排除上传者，但公共 ID 仍可直接读取详情", async () => {
+    const now = new Date();
+    const ownId = crypto.randomUUID();
+    const otherId = crypto.randomUUID();
+    await migrationConnection.db.insert(publicAssets).values(
+      [
+        [ownId, "user-a"],
+        [otherId, "user-b"],
+      ].map(([id, uploaderUserId]) => ({
+        id: id!,
+        uploaderUserId,
+        name: id!,
+        description: "",
+        mediaType: "image" as const,
+        originalFilename: `${id}.jpg`,
+        originalPath: `/tmp/${id}.jpg`,
+        mimeType: "image/jpeg",
+        sizeBytes: 1,
+        processingStatus: "completed" as const,
+        reviewStatus: "published" as const,
+        createdAt: now,
+        updatedAt: now,
+      })),
+    );
+
+    expect(
+      (await repository.listAssets({ excludeUserId: "user-a" })).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual([otherId]);
+    await expect(repository.getAssetDetail(ownId)).resolves.toMatchObject({
+      id: ownId,
+    });
   });
 
   test("用户资源用量精确汇总素材对象，并排除公共素材和完整父视频", async () => {
@@ -1005,7 +1104,7 @@ mysqlTest("MySQL 数据层", () => {
     await migrationConnection.db.insert(videoSources).values({
       id: parentSourceId,
       userId,
-      mediaObjectId: parentObjectId,
+      privateMediaObjectId: parentObjectId,
       originalFilename: "parent.mp4",
       mimeType: "video/mp4",
       sizeBytes: 1_000,
@@ -1052,14 +1151,13 @@ mysqlTest("MySQL 数据层", () => {
         mimeType: item.mediaType === "video" ? "video/mp4" : "image/jpeg",
         mediaType: item.mediaType,
         sizeBytes: item.sizeBytes,
-        directPublish: true,
         enqueueAnalysis: false,
       });
       if (item.thumbnailMediaObjectId) {
         await migrationConnection.db
-          .update(assets)
+          .update(privateAssets)
           .set({ thumbnailMediaObjectId: item.thumbnailMediaObjectId })
-          .where(eq(assets.id, item.id));
+          .where(eq(privateAssets.id, item.id));
       }
     }
     for (const [otherUserId, name, sizeBytes, mediaObjectId] of [
@@ -1077,7 +1175,6 @@ mysqlTest("MySQL 数据层", () => {
         mimeType: "image/jpeg",
         mediaType: "image",
         sizeBytes,
-        directPublish: true,
         enqueueAnalysis: false,
       });
     }
@@ -1093,13 +1190,12 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 20,
-      directPublish: true,
       enqueueAnalysis: false,
     });
     await migrationConnection.db
-      .update(assets)
-      .set({ reviewStatus: "deleted", deletedAt: now })
-      .where(eq(assets.id, deletedAssetId));
+      .update(privateAssets)
+      .set({ deletedAt: now })
+      .where(eq(privateAssets.id, deletedAssetId));
 
     const usage = await repository.summarizeUserStorage(`  ${userId}  `);
     expect(usage).toMatchObject({
@@ -1163,9 +1259,9 @@ mysqlTest("MySQL 数据层", () => {
 
     // 同毫秒创建的素材依靠 UUID 作为第二排序键；翻页期间插入更新素材也不漂移。
     await migrationConnection.db
-      .update(assets)
+      .update(privateAssets)
       .set({ createdAt: now })
-      .where(inArray(assets.id, expectedItems.map((item) => item.id)));
+      .where(inArray(privateAssets.id, expectedItems.map((item) => item.id)));
     const firstPage = await repository.listUserMediaPage(userId, null, 2);
     expect(firstPage).toMatchObject({ hasMore: true });
     expect(firstPage.nextCursor).toEqual({
@@ -1184,13 +1280,12 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 20,
-      directPublish: true,
       enqueueAnalysis: false,
     });
     await migrationConnection.db
-      .update(assets)
+      .update(privateAssets)
       .set({ createdAt: new Date(now.getTime() + 1_000) })
-      .where(eq(assets.id, newerAssetId));
+      .where(eq(privateAssets.id, newerAssetId));
 
     const secondPage = await repository.listUserMediaPage(
       userId,
@@ -1213,7 +1308,6 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 10,
-      directPublish: false,
       enqueueAnalysis: false,
     });
 
@@ -1237,53 +1331,6 @@ mysqlTest("MySQL 数据层", () => {
     expect(count?.value).toBe(1);
   });
 
-  test("转公共提交后，排队中的旧用户更新不能越过所有权检查", async () => {
-    const assetId = crypto.randomUUID();
-    await repository.createAsset({
-      assetId,
-      userId: "owner-a",
-      name: "original",
-      originalFilename: "owned.jpg",
-      originalPath: "/tmp/owned.jpg",
-      mimeType: "image/jpeg",
-      mediaType: "image",
-      sizeBytes: 10,
-      directPublish: false,
-      enqueueAnalysis: false,
-    });
-
-    const blocker = await migrationConnection.pool.getConnection();
-    try {
-      await blocker.beginTransaction();
-      await blocker.query("UPDATE assets SET user_id = NULL WHERE id = ?", [assetId]);
-      const updateAttempt = repository
-        .updateAssetMetadata(
-          assetId,
-          { name: "stale update", description: "", tags: [] },
-          { userId: "owner-a" },
-        )
-        .then(
-          () => ({ ok: true as const }),
-          (error: unknown) => ({ ok: false as const, error }),
-        );
-      // 给另一个连接足够时间进入 SELECT ... FOR UPDATE 的等待队列。
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      await blocker.commit();
-
-      const outcome = await updateAttempt;
-      expect(outcome.ok).toBe(false);
-      if (!outcome.ok) expect(outcome.error).toMatchObject({ status: 404 });
-    } finally {
-      await blocker.rollback().catch(() => undefined);
-      blocker.release();
-    }
-    const [stored] = await migrationConnection.db
-      .select({ userId: assets.userId, name: assets.name })
-      .from(assets)
-      .where(eq(assets.id, assetId));
-    expect(stored).toEqual({ userId: null, name: "original" });
-  }, 30_000);
-
   test("删除提交后，排队中的 publish 不能把 deleted 素材复活", async () => {
     const assetId = crypto.randomUUID();
     await repository.createAsset({
@@ -1294,19 +1341,18 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 10,
-      directPublish: false,
       enqueueAnalysis: false,
     });
     await migrationConnection.db
-      .update(assets)
+      .update(publicAssets)
       .set({ processingStatus: "completed" })
-      .where(eq(assets.id, assetId));
+      .where(eq(publicAssets.id, assetId));
 
     const blocker = await migrationConnection.pool.getConnection();
     try {
       await blocker.beginTransaction();
       await blocker.query(
-        "UPDATE assets SET review_status = 'deleted', deleted_at = UTC_TIMESTAMP(3) WHERE id = ?",
+        "UPDATE public_assets SET review_status = 'deleted', deleted_at = UTC_TIMESTAMP(3) WHERE id = ?",
         [assetId],
       );
       const publishAttempt = repository
@@ -1326,9 +1372,9 @@ mysqlTest("MySQL 数据层", () => {
       blocker.release();
     }
     const [stored] = await migrationConnection.db
-      .select({ reviewStatus: assets.reviewStatus })
-      .from(assets)
-      .where(eq(assets.id, assetId));
+      .select({ reviewStatus: publicAssets.reviewStatus })
+      .from(publicAssets)
+      .where(eq(publicAssets.id, assetId));
     expect(stored?.reviewStatus).toBe("deleted");
   }, 30_000);
 
@@ -1377,7 +1423,7 @@ mysqlTest("MySQL 数据层", () => {
     ]);
     await migrationConnection.db.insert(videoSources).values({
       id: sourceId,
-      mediaObjectId: parentObjectId,
+      publicMediaObjectId: parentObjectId,
       originalFilename: "parent.mp4",
       mimeType: "video/mp4",
       sizeBytes: 30,
@@ -1400,13 +1446,12 @@ mysqlTest("MySQL 数据层", () => {
         mimeType: "video/mp4",
         mediaType: "video",
         sizeBytes: segmentIndex === 0 ? 10 : 20,
-        directPublish: true,
         enqueueAnalysis: false,
       });
       await migrationConnection.db
-        .update(assets)
+        .update(publicAssets)
         .set({ processingStatus: "completed", reviewStatus: "published" })
-        .where(eq(assets.id, assetId));
+        .where(eq(publicAssets.id, assetId));
     }
 
     async function deletionJob(assetId: string) {
@@ -1427,7 +1472,8 @@ mysqlTest("MySQL 数据层", () => {
       return {
         id: storedJob.id,
         taskId: storedJob.taskId,
-        assetId: storedJob.assetId,
+        assetId: storedJob.publicAssetId,
+        assetKind: "public" as const,
         type: storedJob.type,
         attempt: 1,
         payload: storedJob.payload,
@@ -1454,8 +1500,8 @@ mysqlTest("MySQL 数据层", () => {
     expect(
       await migrationConnection.db
         .select()
-        .from(assets)
-        .where(inArray(assets.id, [firstAssetId, secondAssetId])),
+        .from(publicAssets)
+        .where(inArray(publicAssets.id, [firstAssetId, secondAssetId])),
     ).toHaveLength(0);
     expect(
       await migrationConnection.db
@@ -1494,7 +1540,7 @@ mysqlTest("MySQL 数据层", () => {
       ),
     ).toHaveLength(1);
     const durableJobs = await migrationConnection.db
-      .select({ status: jobs.status, assetId: jobs.assetId })
+      .select({ status: jobs.status, assetId: jobs.publicAssetId })
       .from(jobs)
       .where(inArray(jobs.id, [firstJob.id, secondJob.id]));
     expect(durableJobs).toEqual(
@@ -1506,6 +1552,7 @@ mysqlTest("MySQL 数据层", () => {
   }, 30_000);
 
   test("公共删除在外部存储短暂失败后可幂等重试并完成数据库收尾", async () => {
+    vi.stubEnv("ZOS_DELETE_BEST_EFFORT", "false");
     const now = new Date();
     const objectId = crypto.randomUUID();
     const assetId = crypto.randomUUID();
@@ -1530,17 +1577,28 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 10,
-      directPublish: true,
       enqueueAnalysis: false,
     });
     await migrationConnection.db
-      .update(assets)
+      .update(publicAssets)
       .set({ processingStatus: "completed", reviewStatus: "published" })
-      .where(eq(assets.id, assetId));
+      .where(eq(publicAssets.id, assetId));
     const queuedPublish = await repository.createMutationTask({
       type: "publish",
       assetId,
-      payload: { userId: null },
+      userId: "publish-requester",
+      payload: { userId: "publish-requester" },
+    });
+    const [initialPublishJob] = await migrationConnection.db
+      .select({
+        publicAssetId: jobs.publicAssetId,
+        privateAssetId: jobs.privateAssetId,
+      })
+      .from(jobs)
+      .where(eq(jobs.taskId, queuedPublish.task.id));
+    expect(initialPublishJob).toEqual({
+      publicAssetId: assetId,
+      privateAssetId: null,
     });
     const created = await repository.createMutationTask({
       type: "delete",
@@ -1556,7 +1614,13 @@ mysqlTest("MySQL 数据层", () => {
       .update(jobs)
       .set({ status: "running", attempt: 1 })
       .where(eq(jobs.id, storedJob.id));
-    const job = { ...storedJob, status: "running" as const, attempt: 1 };
+    const job = {
+      ...storedJob,
+      assetId: storedJob.publicAssetId,
+      assetKind: "public" as const,
+      status: "running" as const,
+      attempt: 1,
+    };
     let storageAttempt = 0;
     const deleteObject = vi.fn(async () => {
       storageAttempt += 1;
@@ -1572,9 +1636,9 @@ mysqlTest("MySQL 数据层", () => {
       "temporary ZOS failure",
     );
     const [reserved] = await migrationConnection.db
-      .select({ reviewStatus: assets.reviewStatus })
-      .from(assets)
-      .where(eq(assets.id, assetId));
+      .select({ reviewStatus: publicAssets.reviewStatus })
+      .from(publicAssets)
+      .where(eq(publicAssets.id, assetId));
     expect(reserved?.reviewStatus).toBe("deleted");
 
     await processMutationJob(job, storage);
@@ -1583,15 +1647,19 @@ mysqlTest("MySQL 数据层", () => {
     expect(
       await migrationConnection.db
         .select()
-        .from(assets)
-        .where(eq(assets.id, assetId)),
+        .from(publicAssets)
+        .where(eq(publicAssets.id, assetId)),
     ).toHaveLength(0);
     const [finishedTask] = await migrationConnection.db
       .select({ status: tasks.status })
       .from(tasks)
       .where(eq(tasks.id, created.task.id));
     const [finishedJob] = await migrationConnection.db
-      .select({ status: jobs.status, assetId: jobs.assetId, payload: jobs.payload })
+      .select({
+        status: jobs.status,
+        assetId: jobs.publicAssetId,
+        payload: jobs.payload,
+      })
       .from(jobs)
       .where(eq(jobs.id, storedJob.id));
     expect(finishedTask?.status).toBe("done");
@@ -1607,7 +1675,7 @@ mysqlTest("MySQL 数据层", () => {
       .where(eq(jobs.taskId, queuedPublish.task.id));
     expect(publishJob).toMatchObject({
       status: "queued",
-      assetId: null,
+      publicAssetId: null,
       payload: { assetId },
     });
     await migrationConnection.db
@@ -1619,7 +1687,8 @@ mysqlTest("MySQL 数据层", () => {
         {
           id: publishJob!.id,
           taskId: publishJob!.taskId,
-          assetId: publishJob!.assetId,
+          assetId: publishJob!.publicAssetId,
+          assetKind: "public",
           type: publishJob!.type,
           attempt: 1,
           payload: publishJob!.payload,
@@ -1744,7 +1813,6 @@ mysqlTest("MySQL 数据层", () => {
         mimeType: input.mediaType === "video" ? "video/mp4" : "image/jpeg",
         mediaType: input.mediaType ?? "image",
         sizeBytes: 10,
-        directPublish: true,
         enqueueAnalysis: false,
       });
       await repository.updateAssetMetadata(
@@ -1752,13 +1820,20 @@ mysqlTest("MySQL 数据层", () => {
         { name: input.name, description: "", tags: input.tags },
         { includeAllUsers: true },
       );
-      await migrationConnection.db
-        .update(assets)
-        .set({
-          processingStatus: input.processingStatus ?? "completed",
-          reviewStatus: input.reviewStatus ?? "published",
-        })
-        .where(eq(assets.id, id));
+      if (input.userId) {
+        await migrationConnection.db
+          .update(privateAssets)
+          .set({ processingStatus: input.processingStatus ?? "completed" })
+          .where(eq(privateAssets.id, id));
+      } else {
+        await migrationConnection.db
+          .update(publicAssets)
+          .set({
+            processingStatus: input.processingStatus ?? "completed",
+            reviewStatus: input.reviewStatus ?? "published",
+          })
+          .where(eq(publicAssets.id, id));
+      }
       return id;
     }
 
@@ -1857,6 +1932,21 @@ mysqlTest("MySQL 数据层", () => {
         limit: 100,
       })).total,
     ).toBe(1);
+    const scopedEmptySearch = await repository.queryAssetsPage({
+      ...options,
+      userId: "user-without-assets",
+      limit: 100,
+    });
+    expect(scopedEmptySearch).toMatchObject({
+      items: [],
+      total: 0,
+      search: {
+        mode: "keyword",
+        reason: "no_candidates",
+        max_score: null,
+      },
+    });
+    expect(scopedEmptySearch.search?.message).toBeTruthy();
     expect(
       (await repository.queryAssetsPage({
         excludeUserId: "user-a",
@@ -1874,6 +1964,185 @@ mysqlTest("MySQL 数据层", () => {
     });
     expect(beyondLastPage.items).toEqual([]);
     expect(beyondLastPage.page).toBe(999);
+
+    const relevantAiAsset = await seedAsset({
+      name: "ai-relevant",
+      tags: [{ category: "object", value: "AI" }],
+    });
+    const irrelevantAiAsset = await seedAsset({
+      name: "ai-irrelevant",
+      tags: [{ category: "object", value: "AI" }],
+    });
+    const thirdAiAsset = await seedAsset({
+      name: "ai-third",
+      tags: [{ category: "object", value: "AI" }],
+    });
+    const suppressedAiAsset = await seedAsset({
+      name: "ai-suppressed",
+      tags: [{ category: "object", value: "AI" }],
+    });
+    searchAnalysisMock.mockImplementation(
+      async (_query: string, _limit: number, candidateIds?: string[]) =>
+        new Map(
+          (candidateIds ?? []).map((assetId) => [
+            assetId,
+            assetId === relevantAiAsset ? 0.9 : 0.1,
+          ]),
+        ),
+    );
+    const broadAiSearch = await repository.queryAssetsPage({
+      keywords: ["AI"],
+      limit: 100,
+      includeTagStatistics: true,
+    });
+    expect(broadAiSearch.items.map((item) => item.id)).toEqual([
+      relevantAiAsset,
+    ]);
+    expect(broadAiSearch).toMatchObject({
+      total: 1,
+      totalPages: 1,
+      search: {
+        mode: "hybrid",
+        threshold: 0.65,
+        max_score: 0.94,
+        reason: "matched",
+        message: null,
+      },
+    });
+    expect(broadAiSearch.items[0]).toMatchObject({
+      searchScore: 0.94,
+      keywordScore: 1,
+      semanticScore: 0.9,
+      matchType: "hybrid",
+      matchedTerms: ["ai"],
+      matchedCategories: ["object"],
+    });
+    expect(broadAiSearch.tagStatistics?.total_assets).toBe(1);
+    expect(broadAiSearch.items.some((item) => item.id === irrelevantAiAsset)).toBe(
+      false,
+    );
+
+    searchAnalysisMock.mockImplementation(
+      async (_query: string, _limit: number, candidateIds?: string[]) =>
+        new Map(
+          (candidateIds ?? []).map((assetId) => [
+            assetId,
+            assetId === relevantAiAsset
+              ? 0.4
+              : assetId === irrelevantAiAsset
+                ? 0.3
+                : assetId === thirdAiAsset
+                  ? 0.2
+                  : 0.1,
+          ]),
+        ),
+    );
+    const lowSemanticAiSearch = await repository.queryAssetsPage({
+      keywords: ["ai"],
+      limit: 100,
+    });
+    expect(lowSemanticAiSearch.items.map((item) => item.id)).toEqual([
+      relevantAiAsset,
+      irrelevantAiAsset,
+      thirdAiAsset,
+      suppressedAiAsset,
+    ]);
+    expect(lowSemanticAiSearch).toMatchObject({
+      total: 4,
+      search: {
+        mode: "keyword",
+        threshold: 0.6,
+        max_score: 1,
+        reason: "matched",
+        message: null,
+      },
+    });
+    expect(
+      lowSemanticAiSearch.items.every(
+        (item) => item.searchScore === 1 && item.matchType === "exact",
+      ),
+    ).toBe(true);
+    expect(
+      lowSemanticAiSearch.items.some((item) => item.id === suppressedAiAsset),
+    ).toBe(true);
+
+    const semanticCallsBeforeFallback = searchAnalysisMock.mock.calls.length;
+    semanticSearchEnabledMock.mockReturnValueOnce(false);
+    const unavailableSemanticAiSearch = await repository.queryAssetsPage({
+      keywords: ["AI"],
+      limit: 100,
+    });
+    expect(searchAnalysisMock).toHaveBeenCalledTimes(semanticCallsBeforeFallback);
+    expect(unavailableSemanticAiSearch.items).toHaveLength(4);
+    expect(unavailableSemanticAiSearch.search).toMatchObject({
+      mode: "keyword",
+      threshold: 0.6,
+      max_score: 1,
+      reason: "matched",
+      message: null,
+    });
+
+    const exactCityAsset = await seedAsset({
+      name: "exact-city",
+      userId: "city-scope",
+      tags: [{ category: "scene", value: "城市" }],
+    });
+    const containsCityAsset = await seedAsset({
+      name: "contains-city",
+      userId: "city-scope",
+      tags: [{ category: "style", value: "古城市风光" }],
+    });
+    const citySearch = await repository.queryAssetsPage({
+      userId: "city-scope",
+      keywords: ["城市"],
+      limit: 100,
+    });
+    expect(new Set(citySearch.items.map((item) => item.id))).toEqual(
+      new Set([exactCityAsset, containsCityAsset]),
+    );
+    expect(citySearch.items.find((item) => item.id === containsCityAsset)).toMatchObject({
+      searchScore: 0.648,
+      matchType: "contains",
+    });
+
+    const wholeTypoAsset = await seedAsset({
+      name: "whole-query-typo",
+      userId: "typo-scope",
+      tags: [{ category: "style", value: "古城巿风光" }],
+    });
+    const wholeTypoSearch = await repository.queryAssetsPage({
+      userId: "typo-scope",
+      keywords: ["古城市风光"],
+      limit: 100,
+    });
+    expect(wholeTypoSearch.items.map((item) => item.id)).toEqual([
+      wholeTypoAsset,
+    ]);
+    expect(wholeTypoSearch.items[0]).toMatchObject({
+      searchScore: 0.495,
+      keywordScore: 0.495,
+      matchType: "typo",
+      matchedTerms: ["古城市风光"],
+    });
+
+    const tokenAsset = await seedAsset({
+      name: "one-exact-token",
+      userId: "token-scope",
+      tags: [{ category: "object", value: "小船" }],
+    });
+    for (const query of ["blue 小船", "小船 dsfj"]) {
+      const tokenSearch = await repository.queryAssetsPage({
+        userId: "token-scope",
+        keywords: [query],
+        limit: 100,
+      });
+      expect(tokenSearch.items.map((item) => item.id)).toEqual([tokenAsset]);
+      expect(tokenSearch.items[0]).toMatchObject({
+        searchScore: 0.85,
+        matchType: "exact",
+        matchedTerms: ["小船"],
+      });
+    }
 
     searchAnalysisMock.mockImplementation(
       async (_query: string, _limit: number, candidateIds?: string[]) =>
@@ -1894,8 +2163,312 @@ mysqlTest("MySQL 数据层", () => {
       "海边的小船",
       800,
       expect.arrayContaining([first, second]),
+      { minimumSimilarity: 0 },
     );
     const semanticCandidateIds = searchAnalysisMock.mock.lastCall?.[2] as string[];
     expect(new Set(semanticCandidateIds)).toEqual(new Set([first, second]));
+  }, 30_000);
+
+  test.each(["published", "pending_review"] as const)("兼容匹配 %s 素材、持久化任务并投递 camelCase 回调", async (reviewStatus) => {
+    const assetId = crypto.randomUUID();
+    await repository.createAsset({
+      assetId,
+      userId: "759",
+      name: "夕阳下的人物",
+      originalFilename: "sunset.mp4",
+      originalPath: `/tmp/${assetId}`,
+      mimeType: "video/mp4",
+      mediaType: "video",
+      sizeBytes: 10,
+      enqueueAnalysis: false,
+    });
+    await repository.updateAssetMetadata(
+      assetId,
+      {
+        name: "夕阳下的人物",
+        description: "夕阳下女性剪影，符合回忆意境",
+        tags: [],
+      },
+      { includeAllUsers: true },
+    );
+    await migrationConnection.db
+      .update(privateAssets)
+      .set({ processingStatus: "completed", reviewStatus })
+      .where(eq(privateAssets.id, assetId));
+    searchAnalysisMock.mockResolvedValue(new Map([[assetId, 0.91]]));
+
+    const { compatibilityMatchRequestSchema } = await import("@/shared/contracts");
+    const { processCompatibilityMatchJob } = await import(
+      "@/server/services/compatibility-match"
+    );
+    const { processCallbackJob } = await import("@/server/services/callbacks");
+    const request = compatibilityMatchRequestSchema.parse({
+      asr: {
+        transcripts: [
+          {
+            sentences: [
+              {
+                text: "如果能回到二十岁",
+                words: [
+                  {
+                    text: "如果能回到二十岁",
+                    begin_time: 320,
+                    end_time: 1600,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      asset_url_list: [],
+      callback_url: "https://callback.invalid/api/media/callback",
+      llm: JSON.stringify({
+        segments: [
+          {
+            segment_id: 1,
+            text: "如果能回到二十岁",
+            high_light_word: "回到二十岁",
+            level: 1,
+            transition: "fade",
+          },
+        ],
+      }),
+      text: "如果能回到二十岁",
+      business_id: "business-42",
+    });
+
+    const taskId = crypto.randomUUID();
+    const matchJobId = crypto.randomUUID();
+    const now = new Date();
+    const matchPayload = {
+      request,
+      publicOrigin: "https://focus.example.com",
+      callbackFields: { business_id: "business-42" },
+    };
+    await migrationConnection.db.insert(tasks).values({
+      id: taskId,
+      type: "match",
+      status: "running",
+      phase: "matching",
+      callbackUrl: request.callback_url,
+      totalItems: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await migrationConnection.db.insert(jobs).values({
+      id: matchJobId,
+      taskId,
+      type: "match",
+      status: "running",
+      phase: "matching",
+      payload: matchPayload,
+      attempt: 1,
+      availableAt: now,
+      claimedAt: now,
+      leaseOwner: "compatibility-match-test",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await processCompatibilityMatchJob({
+      id: matchJobId,
+      taskId,
+      assetId: null,
+      type: "match",
+      attempt: 1,
+      payload: matchPayload,
+      claimedAt: now,
+      leaseOwner: "compatibility-match-test",
+    });
+
+    const [completedTask] = await migrationConnection.db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, taskId));
+    expect(completedTask).toMatchObject({
+      type: "match",
+      status: "done",
+      phase: "finished",
+      result: {
+        segments: [
+          expect.objectContaining({
+            segment_id: 1,
+            keyword: "回到二十岁",
+            group_id: [1, 1],
+            start_time: 0.32,
+            end_time: 1.6,
+            transition: "fade",
+            matched_candidate_type: "video",
+            matched_candidate_desc: "夕阳下女性剪影，符合回忆意境",
+            matched_candidate_score: 0.91,
+            matched_candidate_reason: null,
+            matched_candidate_message: null,
+          }),
+        ],
+      },
+    });
+    expect(searchAnalysisMock).toHaveBeenCalledWith(
+      "如果能回到二十岁",
+      5,
+      [assetId],
+      { minimumSimilarity: 0 },
+    );
+
+    const [generatedCallback] = await migrationConnection.db
+      .select()
+      .from(jobs)
+      .where(and(eq(jobs.taskId, taskId), eq(jobs.type, "callback")))
+      .limit(1);
+    expect(generatedCallback?.payload).toMatchObject({
+      compatibilityCallback: {
+        business_id: "business-42",
+        taskId,
+        status: "success",
+      },
+    });
+    const callbackJobId = crypto.randomUUID();
+    await migrationConnection.db.insert(jobs).values({
+      id: callbackJobId,
+      taskId,
+      type: "callback",
+      status: "running",
+      phase: "notifying",
+      payload: generatedCallback!.payload,
+      attempt: 1,
+      availableAt: now,
+      claimedAt: now,
+      leaseOwner: "compatibility-callback-test",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const callbackJob = {
+      id: callbackJobId,
+      taskId,
+      assetId: null,
+      type: "callback" as const,
+      attempt: 1,
+      payload: generatedCallback!.payload,
+      claimedAt: now,
+      leaseOwner: "compatibility-callback-test",
+    };
+    const callbackFetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    let callbackBodyJson = "";
+    try {
+      await processCallbackJob(callbackJob!);
+      expect(callbackFetch).toHaveBeenCalledTimes(1);
+      const [, fetchInit] = callbackFetch.mock.calls[0]!;
+      callbackBodyJson = String(fetchInit?.body);
+    } finally {
+      callbackFetch.mockRestore();
+    }
+    const callbackBody = JSON.parse(callbackBodyJson) as {
+      completed_at: string;
+      result: { segments: Array<{ matched_candidate_url: string }> };
+      [key: string]: unknown;
+    };
+    expect(callbackBody).toMatchObject({
+      business_id: "business-42",
+      taskId,
+      status: "success",
+      result: {
+        segments: [
+          expect.objectContaining({
+            segment_id: 1,
+            matched_candidate_type: "video",
+            matched_candidate_score: 0.91,
+            matched_candidate_reason: null,
+            matched_candidate_message: null,
+          }),
+        ],
+      },
+    });
+    expect(callbackBody.completed_at).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}$/,
+    );
+    expect(callbackBody).not.toHaveProperty("asr");
+    expect(callbackBody).not.toHaveProperty("llm");
+    const matchedUrl = new URL(
+      callbackBody.result.segments[0].matched_candidate_url,
+    );
+    expect(matchedUrl.origin).toBe("https://focus.example.com");
+    expect(matchedUrl.pathname).toContain(`/api/v1/media/${assetId}`);
+    expect(matchedUrl.searchParams.get("user_id")).toBe("759");
+  }, 30_000);
+
+  test("将失败的素材错误码与公私素材 ID 向上聚合到 item 和 task", async () => {
+    const now = new Date();
+    const taskId = crypto.randomUUID();
+    const itemId = crypto.randomUUID();
+    const okAssetId = crypto.randomUUID();
+    const failedAssetId = crypto.randomUUID();
+    await migrationConnection.db.insert(tasks).values({
+      id: taskId,
+      type: "upload",
+      status: "running",
+      phase: "analyzing",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await migrationConnection.db.insert(taskItems).values({
+      id: itemId,
+      taskId,
+      ordinal: 0,
+      filename: "a.jpg",
+      stagingPath: "/tmp/a.jpg",
+      status: "running",
+      phase: "analyzing",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const insertAsset = (id: string, status: "completed" | "failed") =>
+      migrationConnection.db.insert(privateAssets).values({
+        id,
+        userId: "user-a",
+        taskId,
+        taskItemId: itemId,
+        name: "a",
+        description: "",
+        mediaType: "image",
+        originalFilename: "a.jpg",
+        originalPath: "/tmp/a.jpg",
+        mimeType: "image/jpeg",
+        sizeBytes: 1,
+        processingStatus: status,
+        failureCode: status === "failed" ? "model_response_invalid" : null,
+        failureMessage: status === "failed" ? "模型返回内容无法验证。" : null,
+        createdAt: now,
+        updatedAt: now,
+      });
+    await insertAsset(okAssetId, "completed");
+    await insertAsset(failedAssetId, "failed");
+
+    await lifecycle.refreshTaskForAsset(failedAssetId);
+
+    const [storedItem] = await migrationConnection.db
+      .select()
+      .from(taskItems)
+      .where(eq(taskItems.id, itemId));
+    expect(storedItem).toBeDefined();
+    expect(storedItem?.status).toBe("failed");
+    expect(storedItem?.errorCode).toBe("model_response_invalid");
+    expect(storedItem?.errorDetails).toMatchObject({
+      codes: ["model_response_invalid"],
+      failedAssetIds: [failedAssetId],
+    });
+
+    const [storedTask] = await migrationConnection.db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, taskId));
+    expect(storedTask).toBeDefined();
+    expect(storedTask?.status).toBe("failed");
+    expect(storedTask?.errorCode).toBe("model_response_invalid");
+    expect(storedTask?.errorDetails).toMatchObject({
+      codes: ["model_response_invalid"],
+      failedItems: 1,
+      failedAssetIds: [failedAssetId],
+    });
   }, 30_000);
 });
