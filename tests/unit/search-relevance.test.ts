@@ -35,6 +35,22 @@ describe("search relevance", () => {
     expect(tokenizeKeywordQuery("paid media")).not.toContain("ai");
   });
 
+  it("keeps whitespace and punctuation boundaries between single Han terms", () => {
+    expect(tokenizeKeywordQuery("猫 狗")).toEqual(["猫", "狗"]);
+    expect(tokenizeKeywordQuery("猫\t狗")).toEqual(["猫", "狗"]);
+    expect(tokenizeKeywordQuery("猫，狗")).toEqual(["猫", "狗"]);
+    expect(tokenizeKeywordQuery("城巿")).toEqual(["城巿"]);
+  });
+
+  it("finds the AI alias group regardless of custom alias ordering", () => {
+    const aliases = [["猫", "宠物"], ["智能计算", "ai"]];
+    expect(isBroadAiQuery("AI", aliases)).toBe(true);
+    expect(isBroadAiQuery("智能计算", aliases)).toBe(true);
+    expect(isBroadAiQuery("猫", aliases)).toBe(false);
+    expect(isBroadAiQuery("宠物", aliases)).toBe(false);
+    expect(isBroadAiQuery("AI", [...aliases].reverse())).toBe(true);
+  });
+
   it("scores exact, alias, prefix, and contains matches on a zero-to-one scale", () => {
     expect(classifyTagMatch("夜景", "夜景")).toEqual({
       matchType: "exact",
