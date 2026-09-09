@@ -385,12 +385,13 @@ describe("API v1 contracts and routes", () => {
       callback_url: "https://callback.example.test/legacy",
       business_id: "biz-7",
     };
+    vi.stubEnv("PUBLIC_BASE_URL", "https://focus.example.com/base-path");
     const response = await createCompatibilityMatch(
       new Request("http://internal.invalid/api/v1/compat/segment-match", {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-forwarded-host": "focus.example.com",
+          "x-forwarded-host": "spoofed.example.test",
           "x-forwarded-proto": "https",
         },
         body: JSON.stringify(input),
@@ -414,12 +415,13 @@ describe("API v1 contracts and routes", () => {
   it("accepts the legacy pre-aligned compatibility request shape", async () => {
     const service = fakeService();
     installApiV1Service(service);
+    vi.stubEnv("PUBLIC_BASE_URL", "https://focus.example.com/base-path");
     const response = await createCompatibilityMatch(
       new Request("http://internal.invalid/api/v1/compat/segment-match", {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-forwarded-host": "focus.example.com",
+          "x-forwarded-host": "spoofed.example.test",
           "x-forwarded-proto": "https",
         },
         body: JSON.stringify({
@@ -469,6 +471,7 @@ describe("API v1 contracts and routes", () => {
   it("rejects invalid compatibility semantic controls", async () => {
     const service = fakeService();
     installApiV1Service(service);
+    vi.stubEnv("PUBLIC_BASE_URL", "https://focus.example.com/base-path");
     const response = await createCompatibilityMatch(
       jsonRequest("http://localhost/api/v1/compat/segment-match", {
         callback_url: "https://callback.example.test/legacy",
@@ -492,6 +495,49 @@ describe("API v1 contracts and routes", () => {
     expect(response.status).toBe(400);
     expect(service.createCompatibilityMatchTask).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["", "http://internal.invalid"],
+    ["   ", "http://internal.invalid"],
+    ["https://public.example.test:8443/base-path", "https://public.example.test:8443"],
+  ])("ignores spoofed origin and forwarding headers with PUBLIC_BASE_URL=%j", async (configured, expected) => {
+    vi.stubEnv("PUBLIC_BASE_URL", configured);
+    const service = fakeService();
+    installApiV1Service(service);
+    const request = jsonRequest("http://internal.invalid/api/v1/compat/segment-match", {
+      callback_url: "https://callback.example.test/legacy",
+      asr: {},
+      text: "test",
+      llm: { segments: [{ segment_id: 1, text: "test", level: 1, group_id: [1, 1], start_time: 0, end_time: 1 }] },
+      asset_url_list: [],
+    });
+    request.headers.set("Origin", "https://attacker.example.test");
+    request.headers.set("x-forwarded-host", "x@attacker.example.test");
+    request.headers.set("x-forwarded-proto", "https");
+    request.headers.set("Forwarded", "host=attacker.example.test;proto=https");
+
+    const response = await createCompatibilityMatch(request);
+
+    expect(response.status).toBe(202);
+    expect(service.createCompatibilityMatchTask).toHaveBeenCalledWith(expect.anything(), expected);
+  });
+
+  it.each(["not-a-url", "ftp://public.example.test", "https://user:password@public.example.test"])(
+    "rejects invalid PUBLIC_BASE_URL=%j before creating a task", async (configured) => {
+      vi.stubEnv("PUBLIC_BASE_URL", configured);
+      const service = fakeService();
+      installApiV1Service(service);
+      const response = await createCompatibilityMatch(jsonRequest("http://internal.invalid/api/v1/compat/segment-match", {
+        callback_url: "https://callback.example.test/legacy",
+        asr: {},
+        text: "test",
+        llm: { segments: [{ segment_id: 1, text: "test", level: 1, group_id: [1, 1], start_time: 0, end_time: 1 }] },
+        asset_url_list: [],
+      }));
+      expect(response.status).toBe(500);
+      expect(service.createCompatibilityMatchTask).not.toHaveBeenCalled();
+    },
+  );
 
   it("passes the upload stream to the service without buffering it in the route", async () => {
     const service = fakeService();
