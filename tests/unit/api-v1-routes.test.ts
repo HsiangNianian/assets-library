@@ -14,6 +14,7 @@ import { PUT as receiveUploadItem } from "@/app/api/v1/uploads/[taskId]/items/[i
 import { POST as sealUploadTask } from "@/app/api/v1/uploads/[taskId]/route";
 import { GET as getTask } from "@/app/api/v1/tasks/[taskId]/route";
 import { POST as queryAssets } from "@/app/api/v1/assets/query/route";
+import { POST as createCompatibilityMatch } from "@/app/api/v1/compat/segment-match/route";
 import {
   DELETE as deleteAsset,
   GET as getAsset,
@@ -26,6 +27,7 @@ import { GET as getThumbnail } from "@/app/api/v1/media/[assetId]/thumbnail/rout
 import { GET as getUserMedia } from "@/app/api/v1/users/[userId]/media/route";
 import { GET as getUserStorageUsage } from "@/app/api/v1/users/[userId]/storage-usage/route";
 import { GET as getOpenApi } from "@/app/api/v1/openapi/route";
+import { GET as getWebUiUsers } from "@/app/api/webui/users/route";
 
 const taskId = "00000000-0000-4000-8000-000000000001";
 const itemId = "00000000-0000-4000-8000-000000000002";
@@ -46,11 +48,10 @@ const asset: ApiV1AssetDetail = {
   media_url: `/api/v1/media/${assetId}`,
   original_filename: "demo.png",
   mime_type: "image/png",
-    size_bytes: 3,
-    auto_publish: false,
-    segment_start_seconds: null,
-    segment_end_seconds: null,
-    failure: null,
+  size_bytes: 3,
+  segment_start_seconds: null,
+  segment_end_seconds: null,
+  failure: null,
   analysis: null,
   created_at: now,
   updated_at: now,
@@ -82,7 +83,8 @@ function task(
         received_bytes: 0,
         total_bytes: 3,
         progress_percent: 0,
-        asset_ids: [],
+        private_asset_ids: [],
+        public_asset_ids: [],
         error: null,
       },
     ],
@@ -97,18 +99,23 @@ function task(
 
 function fakeService() {
   return {
+    createCompatibilityMatchTask: vi.fn(async () => ({
+      taskId,
+      status: "processing" as const,
+    })),
     createUploadTask: vi.fn(async () => task()),
     receiveUploadItem: vi.fn(async () =>
       task({ received_bytes: 3, progress_percent: 100 }),
     ),
     sealUploadTask: vi.fn(async () => task()),
     getTask: vi.fn(async () => task()),
-    queryAssets: vi.fn(async () => ({
-      items: [],
-      next_cursor: null,
-      has_more: false,
-      tag_statistics: null,
-    })),
+  queryAssets: vi.fn(async () => ({
+    items: [],
+    next_cursor: null,
+    has_more: false,
+    tag_statistics: null,
+    search: null,
+  })),
     getUserStorageUsage: vi.fn(async (userId: string) => ({
       user_id: userId,
       total_files: 2,
@@ -218,6 +225,7 @@ describe("API v1 contracts and routes", () => {
   afterEach(() => {
     installApiV1Service(undefined);
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it("normalizes an empty user_id to the public scope", () => {
@@ -229,7 +237,6 @@ describe("API v1 contracts and routes", () => {
     ).toEqual({
       user_id: null,
       callback_url: null,
-      auto_publish: false,
       items: [
         {
           filename: "demo.png",
@@ -238,6 +245,15 @@ describe("API v1 contracts and routes", () => {
         },
       ],
     });
+  });
+
+  it("rejects the removed auto_publish upload field", () => {
+    expect(() =>
+      createUploadTaskSchema.parse({
+        auto_publish: false,
+        items: [{ filename: "demo.png", size_bytes: 3 }],
+      }),
+    ).toThrow();
   });
 
   it("enforces the per-task item and byte limits", () => {
@@ -270,7 +286,6 @@ describe("API v1 contracts and routes", () => {
         service.createUploadTask({
           user_id: null,
           callback_url: null,
-          auto_publish: false,
           items: [
             { filename: "first.png", size_bytes: 1, content_type: null },
             { filename: "second.png", size_bytes: 1, content_type: null },
@@ -288,7 +303,6 @@ describe("API v1 contracts and routes", () => {
         service.createUploadTask({
           user_id: null,
           callback_url: null,
-          auto_publish: false,
           items: [
             { filename: "three.png", size_bytes: 3, content_type: null },
           ],
@@ -329,9 +343,201 @@ describe("API v1 contracts and routes", () => {
     expect(body).not.toHaveProperty("taskId");
     expect(body).not.toHaveProperty("receivedBytes");
     expect(service.createUploadTask).toHaveBeenCalledWith(
-      expect.objectContaining({ user_id: "user-7", auto_publish: false }),
+      expect.objectContaining({ user_id: "user-7" }),
     );
   });
+
+  it("accepts the legacy ASR/LLM match body and keeps its camelCase contract", async () => {
+    const service = fakeService();
+    installApiV1Service(service);
+    const input = {
+      asr: {
+        transcripts: [
+          {
+            sentences: [
+              {
+                text: "如果能回到二十岁。",
+                words: [
+                  {
+                    text: "如果能回到二十岁",
+                    begin_time: 320,
+                    end_time: 1_600,
+                    punctuation: "。",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      llm: JSON.stringify({
+        segments: [
+          {
+            segment_id: 1,
+            text: "如果能回到二十岁",
+            high_light_word: "二十岁",
+            level: 2,
+          },
+        ],
+      }),
+      text: "如果能回到二十岁。",
+      asset_url_list: [],
+      callback_url: "https://callback.example.test/legacy",
+      business_id: "biz-7",
+    };
+    vi.stubEnv("PUBLIC_BASE_URL", "https://focus.example.com/base-path");
+    const response = await createCompatibilityMatch(
+      new Request("http://internal.invalid/api/v1/compat/segment-match", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-host": "spoofed.example.test",
+          "x-forwarded-proto": "https",
+        },
+        body: JSON.stringify(input),
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(response.headers.get("location")).toBe(`/api/v1/tasks/${taskId}`);
+    expect(await response.json()).toEqual({ taskId, status: "processing" });
+    expect(service.createCompatibilityMatchTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        business_id: "biz-7",
+        is_random: true,
+        llm: expect.objectContaining({ segments: expect.any(Array) }),
+        semantic_threshold: 0.3,
+      }),
+      "https://focus.example.com",
+    );
+  });
+
+  it("accepts the legacy pre-aligned compatibility request shape", async () => {
+    const service = fakeService();
+    installApiV1Service(service);
+    vi.stubEnv("PUBLIC_BASE_URL", "https://focus.example.com/base-path");
+    const response = await createCompatibilityMatch(
+      new Request("http://internal.invalid/api/v1/compat/segment-match", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-host": "spoofed.example.test",
+          "x-forwarded-proto": "https",
+        },
+        body: JSON.stringify({
+          callback_url: "https://callback.example.test/legacy",
+          asr: {},
+          text: "做过生意的人都明白",
+          llm: {
+            segments: [
+              {
+                segment_id: 1,
+                text: "做过生意的人都明白",
+                keyword: "",
+                level: 1,
+                group_id: [1, 4],
+                start_time: 0.28,
+                end_time: 1.56,
+              },
+            ],
+          },
+          asset_url_list: [
+            {
+              file_url: "https://media.example.test/source.mp4",
+              type: "video",
+            },
+          ],
+          is_random: false,
+          semantic_threshold: 0.72,
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ taskId, status: "processing" });
+    expect(service.createCompatibilityMatchTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        asr: {},
+        asset_url_list: [
+          expect.objectContaining({ type: "video" }),
+        ],
+        is_random: false,
+        semantic_threshold: 0.72,
+      }),
+      "https://focus.example.com",
+    );
+  });
+
+  it("rejects invalid compatibility semantic controls", async () => {
+    const service = fakeService();
+    installApiV1Service(service);
+    vi.stubEnv("PUBLIC_BASE_URL", "https://focus.example.com/base-path");
+    const response = await createCompatibilityMatch(
+      jsonRequest("http://localhost/api/v1/compat/segment-match", {
+        callback_url: "https://callback.example.test/legacy",
+        asr: {},
+        llm: {
+          segments: [
+            {
+              segment_id: 1,
+              text: "做过生意的人都明白",
+              level: 1,
+              group_id: [1, 1],
+              start_time: 0.28,
+              end_time: 1.56,
+            },
+          ],
+        },
+        semantic_threshold: 1.01,
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(service.createCompatibilityMatchTask).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["", "http://internal.invalid"],
+    ["   ", "http://internal.invalid"],
+    ["https://public.example.test:8443/base-path", "https://public.example.test:8443"],
+  ])("ignores spoofed origin and forwarding headers with PUBLIC_BASE_URL=%j", async (configured, expected) => {
+    vi.stubEnv("PUBLIC_BASE_URL", configured);
+    const service = fakeService();
+    installApiV1Service(service);
+    const request = jsonRequest("http://internal.invalid/api/v1/compat/segment-match", {
+      callback_url: "https://callback.example.test/legacy",
+      asr: {},
+      text: "test",
+      llm: { segments: [{ segment_id: 1, text: "test", level: 1, group_id: [1, 1], start_time: 0, end_time: 1 }] },
+      asset_url_list: [],
+    });
+    request.headers.set("Origin", "https://attacker.example.test");
+    request.headers.set("x-forwarded-host", "x@attacker.example.test");
+    request.headers.set("x-forwarded-proto", "https");
+    request.headers.set("Forwarded", "host=attacker.example.test;proto=https");
+
+    const response = await createCompatibilityMatch(request);
+
+    expect(response.status).toBe(202);
+    expect(service.createCompatibilityMatchTask).toHaveBeenCalledWith(expect.anything(), expected);
+  });
+
+  it.each(["not-a-url", "ftp://public.example.test", "https://user:password@public.example.test"])(
+    "rejects invalid PUBLIC_BASE_URL=%j before creating a task", async (configured) => {
+      vi.stubEnv("PUBLIC_BASE_URL", configured);
+      const service = fakeService();
+      installApiV1Service(service);
+      const response = await createCompatibilityMatch(jsonRequest("http://internal.invalid/api/v1/compat/segment-match", {
+        callback_url: "https://callback.example.test/legacy",
+        asr: {},
+        text: "test",
+        llm: { segments: [{ segment_id: 1, text: "test", level: 1, group_id: [1, 1], start_time: 0, end_time: 1 }] },
+        asset_url_list: [],
+      }));
+      expect(response.status).toBe(500);
+      expect(service.createCompatibilityMatchTask).not.toHaveBeenCalled();
+    },
+  );
 
   it("passes the upload stream to the service without buffering it in the route", async () => {
     const service = fakeService();
@@ -509,6 +715,35 @@ describe("API v1 contracts and routes", () => {
       cursor: null,
       limit: 25,
     }, "http://localhost");
+  });
+
+  it("keeps the WebUI user directory behind the page lock", async () => {
+    const service = fakeService();
+    installApiV1Service(service);
+    const key = "u".repeat(64);
+    vi.stubEnv("APP_MODE", "prd");
+    vi.stubEnv("WEBUI_LOCK_KEY", key);
+
+    const unauthorized = await getWebUiUsers(
+      new Request("http://localhost/api/webui/users"),
+    );
+    expect(unauthorized.status).toBe(401);
+    expect(service.listUsers).not.toHaveBeenCalled();
+
+    const response = await getWebUiUsers(
+      new Request("http://localhost/api/webui/users", {
+        headers: { authorization: `Bearer ${key}` },
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await response.json()).toMatchObject({
+      items: [
+        { user_id: "user-7", asset_count: 1 },
+        { user_id: "user-8", display_name: "用户 8", asset_count: 3 },
+      ],
+    });
+    expect(service.listUsers).toHaveBeenCalledOnce();
   });
 
   it("rejects empty, overlong, or malformed encoded user IDs", async () => {
