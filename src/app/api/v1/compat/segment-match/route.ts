@@ -6,24 +6,19 @@ import { compatibilityMatchRequestSchema } from "@/shared/contracts";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/** Only builds callback material URLs; never use this value for auth or CSRF checks.
+ * Set PUBLIC_BASE_URL to the external HTTP(S) URL behind a reverse proxy.
+ * Forwarded headers are client-controlled and deliberately ignored.
+ */
 function publicRequestOrigin(request: Request) {
-  const fallback = new URL(request.url).origin;
-  const forwardedHost = request.headers
-    .get("x-forwarded-host")
-    ?.split(",")[0]
-    ?.trim();
-  const forwardedProtocol = request.headers
-    .get("x-forwarded-proto")
-    ?.split(",")[0]
-    ?.trim();
-  if (!forwardedHost || !["http", "https"].includes(forwardedProtocol ?? "")) {
-    return fallback;
+  const configuredBaseUrl = process.env.PUBLIC_BASE_URL?.trim();
+  if (!configuredBaseUrl) return new URL(request.url).origin;
+
+  const url = new URL(configuredBaseUrl);
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+    throw new Error("PUBLIC_BASE_URL must be an HTTP(S) URL without credentials.");
   }
-  try {
-    return new URL(`${forwardedProtocol}://${forwardedHost}`).origin;
-  } catch {
-    return fallback;
-  }
+  return url.origin;
 }
 
 /** 兼容旧剪辑业务：异步对齐 ASR/LLM 分段、匹配素材并投递 camelCase 回调。 */
